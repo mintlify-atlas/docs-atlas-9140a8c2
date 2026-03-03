@@ -1,0 +1,156 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "GovTech Multicloud Platform",
+  "projectDescription": "Cloud-agnostic infrastructure platform for digital transformation with Terraform, Kubernetes, and DevSecOps practices supporting AWS, OCI, GCP, and Azure",
+  "theme": "aspen",
+  "primaryColor": "#1E40AF",
+  "lightColor": "#60A5FA",
+  "darkColor": "#1E3A8A",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "platform-overview"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/multicloud-design",
+              "architecture/security-layers",
+              "architecture/network-topology",
+              "architecture/scalability"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/setup-guide",
+              "deployment/terraform-configuration",
+              "deployment/kubernetes-deployment",
+              "deployment/environments",
+              "deployment/rollback-procedures"
+            ]
+          },
+          {
+            "group": "Multi-Cloud",
+            "pages": [
+              "multicloud/provider-comparison",
+              "multicloud/aws-implementation",
+              "multicloud/oci-implementation",
+              "multicloud/gcp-implementation",
+              "multicloud/azure-implementation",
+              "multicloud/migration-guide"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/overview",
+              "security/iam-policies",
+              "security/network-policies",
+              "security/secrets-management",
+              "security/compliance"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/monitoring",
+              "operations/disaster-recovery",
+              "operations/backup-restore",
+              "operations/cost-optimization",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Terraform Modules",
+            "pages": [
+              "reference/terraform/networking",
+              "reference/terraform/kubernetes-cluster",
+              "reference/terraform/database",
+              "reference/terraform/storage",
+              "reference/terraform/security"
+            ]
+          },
+          {
+            "group": "Kubernetes Resources",
+            "pages": [
+              "reference/kubernetes/deployments",
+              "reference/kubernetes/services",
+              "reference/kubernetes/networking",
+              "reference/kubernetes/rbac",
+              "reference/kubernetes/autoscaling"
+            ]
+          },
+          {
+            "group": "CI/CD",
+            "pages": [
+              "reference/cicd/pipelines",
+              "reference/cicd/security-scanning",
+              "reference/cicd/deployment-workflows"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Skeleton Template",
+        "groups": [
+          {
+            "group": "Using the Skeleton",
+            "pages": [
+              "skeleton/getting-started",
+              "skeleton/customization",
+              "skeleton/application-integration"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-cloud support (AWS, OCI, GCP, Azure)",
+    "Infrastructure as Code with Terraform modules",
+    "Kubernetes orchestration (EKS/OKE/GKE/AKS)",
+    "DevSecOps CI/CD pipelines with security scanning",
+    "Zero-trust network policies and RBAC",
+    "Disaster recovery with RTO 4h / RPO 24h",
+    "Comprehensive security layers (WAF, GuardDuty, KMS, CloudTrail)",
+    "Auto-scaling and high availability",
+    "Monitoring with CloudWatch/Prometheus/Grafana",
+    "Skeleton template for rapid project setup"
+  ],
+  "publicApiSurface": [
+    "Terraform Module: networking (VPC, subnets, security groups)",
+    "Terraform Module: kubernetes-cluster (EKS/OKE/GKE/AKS)",
+    "Terraform Module: database (RDS/Cloud SQL/Azure DB)",
+    "Terraform Module: storage (S3/Object Storage/Blob)",
+    "Terraform Module: security (WAF, KMS, CloudTrail, GuardDuty)",
+    "Kubernetes: NetworkPolicies (zero-trust)",
+    "Kubernetes: RBAC roles and bindings",
+    "Kubernetes: HPA (Horizontal Pod Autoscaler)",
+    "Kubernetes: PDB (Pod Disruption Budget)",
+    "CI/CD: security-scan workflow (Trivy, Semgrep, Gitleaks, Checkov)",
+    "CI/CD: backend-ci workflow",
+    "CI/CD: frontend-ci workflow",
+    "CI/CD: deploy-dev workflow",
+    "CI/CD: deploy-prod workflow",
+    "ServiceFactory: Cloud provider abstraction layer",
+    "StorageService: uploadFile, downloadFile, deleteFile, listFiles, getSignedUrl",
+    "DatabaseService: executeQuery, getConnection, healthCheck",
+    "MonitoringService: logMetric, createAlarm, getMetrics",
+    "AuthService: authenticate, authorize, getUser"
+  ]
+}
