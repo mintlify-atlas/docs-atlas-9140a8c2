@@ -1,0 +1,540 @@
+---
+title: 'Rollback and Recovery Procedures'
+description: 'Procedures for rolling back deployments and recovering from failures'
+---
+
+## Overview
+
+This guide provides step-by-step procedures for rolling back failed deployments, recovering from infrastructure failures, and restoring data from backups.
+
+## Kubernetes Application Rollback
+
+### Quick Rollback
+
+Roll back to the previous deployment version:
+
+```bash
+# Rollback backend deployment
+kubectl rollout undo deployment/backend -n govtech
+
+# Rollback frontend deployment
+kubectl rollout undo deployment/frontend -n govtech
+
+# Watch rollback progress
+kubectl rollout status deployment/backend -n govtech
+```
+
+### Rollback to Specific Revision
+
+<Steps>
+  <Step title="View Deployment History">
+    ```bash
+    # View rollout history
+    kubectl rollout history deployment/backend -n govtech
+    
+    # Output:
+    # REVISION  CHANGE-CAUSE
+    # 1         Initial deployment
+    # 2         Update to v1.1.0
+    # 3         Update to v1.2.0
+    # 4         Update to v1.3.0 (current, broken)
+    ```
+  </Step>
+
+  <Step title="Check Specific Revision">
+    ```bash
+    # View details of revision 2
+    kubectl rollout history deployment/backend -n govtech --revision=2
+    ```
+  </Step>
+
+  <Step title="Rollback to Revision">
+    ```bash
+    # Rollback to revision 2 (v1.1.0)
+    kubectl rollout undo deployment/backend -n govtech --to-revision=2
+    
+    # Verify rollback
+    kubectl rollout status deployment/backend -n govtech
+    kubectl get pods -n govtech -l app=backend
+    ```
+  </Step>
+
+  <Step title="Verify Application">
+    ```bash
+    # Test health endpoint
+    ALB_URL=$(kubectl get ingress govtech-ingress -n govtech -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+    curl http://$ALB_URL/api/health
+    
+    # Check logs
+    kubectl logs -f deployment/backend -n govtech
+    ```
+  </Step>
+</Steps>
+
+### Manual Rollback (Edit Deployment)
+
+If automated rollback fails, manually revert the image:
+
+```bash
+# Edit deployment directly
+kubectl edit deployment/backend -n govtech
+
+# Change the image tag:
+# FROM: image: 835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend:v1.3.0
+# TO:   image: 835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend:v1.2.0
+
+# Or use kubectl set image
+kubectl set image deployment/backend \
+  backend=835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend:v1.2.0 \
+  -n govtech
+```
+
+## Database Recovery
+
+### Restore from RDS Snapshot
+
+Restore database from automated or manual snapshots:
+
+<Steps>
+  <Step title="List Available Snapshots">
+    ```bash
+    # List automated snapshots
+    aws rds describe-db-snapshots \
+      --db-instance-identifier govtech-dev-postgres \
+      --snapshot-type automated \
+      --query 'DBSnapshots[*].{ID:DBSnapshotIdentifier, Time:SnapshotCreateTime, Size:AllocatedStorage}' \
+      --output table
+    
+    # List manual snapshots
+    aws rds describe-db-snapshots \
+      --db-instance-identifier govtech-dev-postgres \
+      --snapshot-type manual \
+      --output table
+    ```
+  </Step>
+
+  <Step title="Run Restore Script">
+    The platform includes a restore script:
+    
+    ```bash disaster-recovery/scripts/restore-database.sh
+    #!/bin/bash
+    # Restore database from snapshot
+    
+    # Verify snapshot exists
+    ./restore-database.sh --snapshot latest --environment dev --verify-only
+    
+    # Restore from latest snapshot
+    ./restore-database.sh --snapshot latest --environment dev
+    
+    # Restore from specific snapshot
+    ./restore-database.sh \
+      --snapshot rds:govtech-dev-postgres-2026-03-03-02-00 \
+      --environment dev
+    ```
+  </Step>
+
+  <Step title="Update Kubernetes Secrets">
+    After restoration, update the database endpoint:
+    
+    ```bash
+    # Get new RDS endpoint
+    NEW_ENDPOINT=$(aws rds describe-db-instances \
+      --db-instance-identifier govtech-dev-postgres-restored-20260303 \
+      --query 'DBInstances[0].Endpoint.Address' \
+      --output text)
+    
+    echo "New endpoint: $NEW_ENDPOINT"
+    
+    # Update ConfigMap (if DB_HOST is stored there)
+    kubectl edit configmap govtech-config -n govtech
+    # Add or update: DB_HOST: "<NEW_ENDPOINT>"
+    ```
+  </Step>
+
+  <Step title="Restart Backend Pods">
+    ```bash
+    # Restart backend to use new database
+    kubectl rollout restart deployment/backend -n govtech
+    
+    # Wait for rollout to complete
+    kubectl rollout status deployment/backend -n govtech
+    
+    # Verify connection
+    kubectl logs -f deployment/backend -n govtech | grep -i database
+    ```
+  </Step>
+
+  <Step title="Verify Data Integrity">
+    ```bash
+    # Test API endpoints
+    curl http://$ALB_URL/api/health
+    curl http://$ALB_URL/api/workloads
+    
+    # Check database directly (from a pod)
+    kubectl exec -it deployment/backend -n govtech -- \
+      psql -h $NEW_ENDPOINT -U govtech_admin -d govtech -c "SELECT COUNT(*) FROM workloads;"
+    ```
+  </Step>
+
+  <Step title="Clean Up Old Instance (Optional)">
+    ```bash
+    # Only after verifying the restored database works
+    aws rds delete-db-instance \
+      --db-instance-identifier govtech-dev-postgres-old \
+      --skip-final-snapshot
+    ```
+  </Step>
+</Steps>
+
+### Restore from Backup File
+
+Restore from pg_dump backup files stored in S3:
+
+<Steps>
+  <Step title="List Available Backups">
+    ```bash
+    # List backups in S3
+    aws s3 ls s3://govtech-dev-app-storage-835960996869/backups/postgresql/ --recursive
+    
+    # Output:
+    # backups/postgresql/govtech_20260301_0200.dump
+    # backups/postgresql/govtech_20260302_0200.dump
+    # backups/postgresql/govtech_20260303_0200.dump
+    ```
+  </Step>
+
+  <Step title="Download Backup">
+    ```bash
+    # Download latest backup
+    BACKUP_FILE="govtech_20260303_0200.dump"
+    aws s3 cp s3://govtech-dev-app-storage-835960996869/backups/postgresql/$BACKUP_FILE /tmp/$BACKUP_FILE
+    
+    # Verify file integrity
+    ls -lh /tmp/$BACKUP_FILE
+    ```
+  </Step>
+
+  <Step title="Copy to PostgreSQL Pod">
+    ```bash
+    # Get postgres pod name
+    POSTGRES_POD=$(kubectl get pod -l app=postgres -n govtech -o jsonpath='{.items[0].metadata.name}')
+    
+    # Copy backup to pod
+    kubectl cp /tmp/$BACKUP_FILE govtech/$POSTGRES_POD:/tmp/$BACKUP_FILE
+    ```
+  </Step>
+
+  <Step title="Restore Database">
+    ```bash
+    # Restore using pg_restore
+    kubectl exec -it $POSTGRES_POD -n govtech -- \
+      pg_restore \
+        --username=govtech_admin \
+        --dbname=govtech \
+        --clean \
+        --if-exists \
+        --verbose \
+        /tmp/$BACKUP_FILE
+    
+    # Or drop and recreate database first
+    kubectl exec -it $POSTGRES_POD -n govtech -- \
+      psql -U govtech_admin -d postgres -c "DROP DATABASE IF EXISTS govtech;"
+    
+    kubectl exec -it $POSTGRES_POD -n govtech -- \
+      psql -U govtech_admin -d postgres -c "CREATE DATABASE govtech;"
+    
+    kubectl exec -it $POSTGRES_POD -n govtech -- \
+      pg_restore -U govtech_admin -d govtech /tmp/$BACKUP_FILE
+    ```
+  </Step>
+
+  <Step title="Verify Restoration">
+    ```bash
+    # Check table count
+    kubectl exec -it $POSTGRES_POD -n govtech -- \
+      psql -U govtech_admin -d govtech -c "\dt"
+    
+    # Check data
+    kubectl exec -it $POSTGRES_POD -n govtech -- \
+      psql -U govtech_admin -d govtech -c "SELECT COUNT(*) FROM workloads;"
+    ```
+  </Step>
+
+  <Step title="Restart Application">
+    ```bash
+    # Restart backend to reconnect
+    kubectl rollout restart deployment/backend -n govtech
+    ```
+  </Step>
+</Steps>
+
+## Terraform Infrastructure Rollback
+
+### Revert Terraform Changes
+
+<Warning>
+  Infrastructure rollback can cause downtime. Plan carefully and test in dev/staging first.
+</Warning>
+
+<Steps>
+  <Step title="View Terraform State History">
+    ```bash
+    # List state file versions in S3
+    aws s3api list-object-versions \
+      --bucket govtech-terraform-state-835960996869 \
+      --prefix dev/terraform.tfstate \
+      --query 'Versions[*].{Key:Key, VersionId:VersionId, Modified:LastModified}' \
+      --output table
+    ```
+  </Step>
+
+  <Step title="Download Previous State">
+    ```bash
+    # Download specific version
+    aws s3api get-object \
+      --bucket govtech-terraform-state-835960996869 \
+      --key dev/terraform.tfstate \
+      --version-id <VERSION_ID> \
+      /tmp/terraform.tfstate.previous
+    ```
+  </Step>
+
+  <Step title="Review Changes">
+    ```bash
+    # Backup current state
+    terraform state pull > /tmp/terraform.tfstate.backup
+    
+    # Compare states
+    diff /tmp/terraform.tfstate.backup /tmp/terraform.tfstate.previous
+    ```
+  </Step>
+
+  <Step title="Restore State (if needed)">
+    ```bash
+    # Push previous state (DANGEROUS - use with caution)
+    terraform state push /tmp/terraform.tfstate.previous
+    
+    # Or restore via S3
+    aws s3 cp /tmp/terraform.tfstate.previous \
+      s3://govtech-terraform-state-835960996869/dev/terraform.tfstate
+    ```
+  </Step>
+
+  <Step title="Revert Code Changes">
+    ```bash
+    # Revert to previous Git commit
+    git log --oneline
+    git checkout <PREVIOUS_COMMIT> -- terraform/
+    
+    # Apply previous configuration
+    terraform plan
+    terraform apply
+    ```
+  </Step>
+</Steps>
+
+### Destroy and Recreate Resource
+
+For specific resources that need complete recreation:
+
+```bash
+# Target specific resource for destruction
+terraform destroy -target=module.database.aws_db_instance.main
+
+# Recreate resource
+terraform apply -target=module.database.aws_db_instance.main
+```
+
+## Complete Environment Recovery
+
+### Disaster Recovery Plan
+
+Full environment recovery from catastrophic failure:
+
+<Steps>
+  <Step title="Assess Damage">
+    ```bash
+    # Check infrastructure
+    aws eks describe-cluster --name govtech-prod --region us-east-1
+    aws rds describe-db-instances --db-instance-identifier govtech-prod-postgres
+    
+    # Check application
+    kubectl get pods -n govtech
+    kubectl get nodes
+    ```
+  </Step>
+
+  <Step title="Recreate Infrastructure">
+    ```bash
+    cd platform/terraform/environments/prod
+    
+    # Destroy damaged infrastructure
+    terraform destroy
+    
+    # Recreate from code
+    terraform init
+    terraform apply
+    ```
+  </Step>
+
+  <Step title="Restore Database">
+    ```bash
+    # Restore from latest snapshot
+    ./disaster-recovery/scripts/restore-database.sh \
+      --snapshot latest \
+      --environment prod
+    ```
+  </Step>
+
+  <Step title="Redeploy Applications">
+    ```bash
+    # Connect to new cluster
+    aws eks update-kubeconfig --name govtech-prod --region us-east-1
+    
+    # Recreate secrets
+    kubectl create secret generic govtech-secrets \
+      --from-literal=DB_PASSWORD="$PROD_DB_PASSWORD" \
+      --from-literal=DB_USER=govtech_admin \
+      --from-literal=DB_NAME=govtech \
+      -n govtech
+    
+    # Deploy applications
+    cd platform/kubernetes
+    ./deploy.sh prod
+    ```
+  </Step>
+
+  <Step title="Verify Recovery">
+    ```bash
+    # Check all pods running
+    kubectl get pods -n govtech
+    
+    # Test application
+    ALB_URL=$(kubectl get ingress govtech-ingress -n govtech -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+    curl http://$ALB_URL/api/health
+    
+    # Check data
+    curl http://$ALB_URL/api/workloads
+    ```
+  </Step>
+
+  <Step title="Update DNS (if needed)">
+    ```bash
+    # Update Route53 record to new ALB
+    aws route53 change-resource-record-sets \
+      --hosted-zone-id Z1234567890ABC \
+      --change-batch file://dns-update.json
+    ```
+  </Step>
+</Steps>
+
+## Backup Verification
+
+### Automated Backup Testing
+
+Regularly test backups to ensure they work:
+
+```bash
+# Run backup
+ansible-playbook ansible/playbooks/backup.yml -e "environment=dev"
+
+# Test restore in dev environment
+./disaster-recovery/scripts/restore-database.sh \
+  --snapshot latest \
+  --environment dev
+
+# Verify data integrity
+kubectl exec -it deployment/backend -n govtech -- npm run db:verify
+```
+
+### Backup Retention Policy
+
+| Environment | Automated Backups | Manual Backups | S3 Backups |
+|-------------|-------------------|----------------|------------|
+| Dev | 3 days | On-demand | 7 days |
+| Staging | 7 days | Weekly | 30 days |
+| Prod | 30 days | Before major changes | 90 days |
+
+## Monitoring Rollback Success
+
+### Key Metrics to Monitor
+
+```bash
+# Pod health
+kubectl get pods -n govtech -w
+
+# Deployment status
+kubectl rollout status deployment/backend -n govtech
+
+# Error rate
+kubectl logs -f deployment/backend -n govtech | grep -i error
+
+# Response time
+curl -w "@curl-format.txt" -o /dev/null -s http://$ALB_URL/api/health
+```
+
+### CloudWatch Alarms
+
+Set up alarms for rollback detection:
+
+- Pod restart count > 5 in 5 minutes
+- Error rate > 5% for 2 minutes
+- Response time > 2 seconds for 5 minutes
+- Database connection failures
+
+## Emergency Contacts
+
+### Escalation Path
+
+1. **Level 1**: On-call engineer (immediate response)
+2. **Level 2**: Platform team lead (< 15 minutes)
+3. **Level 3**: CTO/Engineering Director (< 30 minutes)
+4. **Level 4**: AWS Support (Enterprise plan)
+
+### Runbook Checklist
+
+<AccordionGroup>
+  <Accordion title="Application Deployment Failed">
+    - [ ] Check deployment logs: `kubectl logs -f deployment/backend -n govtech`
+    - [ ] Check pod status: `kubectl get pods -n govtech`
+    - [ ] Rollback deployment: `kubectl rollout undo deployment/backend -n govtech`
+    - [ ] Verify health: `curl http://$ALB_URL/api/health`
+    - [ ] Review recent changes in Git
+    - [ ] Create incident report
+  </Accordion>
+
+  <Accordion title="Database Failure">
+    - [ ] Check RDS status in AWS Console
+    - [ ] List available snapshots
+    - [ ] Run restore script with --verify-only
+    - [ ] Execute full restore
+    - [ ] Update Kubernetes secrets
+    - [ ] Restart backend pods
+    - [ ] Verify data integrity
+    - [ ] Document recovery time
+  </Accordion>
+
+  <Accordion title="Infrastructure Failure">
+    - [ ] Check AWS Service Health Dashboard
+    - [ ] Review CloudTrail logs
+    - [ ] Assess which resources are affected
+    - [ ] Check Terraform state integrity
+    - [ ] Execute disaster recovery plan
+    - [ ] Notify stakeholders
+    - [ ] Document root cause
+  </Accordion>
+</AccordionGroup>
+
+## Post-Rollback Actions
+
+1. **Root Cause Analysis**: Document what went wrong
+2. **Update Runbooks**: Add new failure scenarios
+3. **Improve Tests**: Add tests to catch the issue earlier
+4. **Team Review**: Share learnings with the team
+5. **Monitoring**: Add alerts to detect similar issues
+
+## Next Steps
+
+- [Set up monitoring and alerts](/monitoring/overview)
+- [Configure CI/CD pipelines](/cicd/overview)
+- [Review security best practices](/security/overview)

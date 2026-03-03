@@ -1,0 +1,339 @@
+---
+title: Networking Policies and Ingress
+description: NetworkPolicies for zero-trust security and Ingress configurations for external access
+---
+
+# Networking Policies and Ingress
+
+This reference documents the network security policies and ingress configurations that control traffic flow in the GovTech platform.
+
+## Zero Trust Architecture
+
+The platform implements a default-deny network policy, then explicitly allows only required traffic:
+
+- Frontend can communicate with Backend
+- Backend can communicate with Database
+- Database cannot initiate outbound connections
+- All components can access DNS
+
+## Default Deny Policy
+
+Blocks all ingress and egress traffic by default:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: govtech
+  labels:
+    app: govtech
+    security: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+```
+
+**Source:** `platform/kubernetes/network-policies.yaml:24-36`
+
+This policy applies to all pods in the `govtech` namespace and denies all traffic until explicitly allowed.
+
+## Frontend Network Policy
+
+Allows frontend to receive traffic from the Ingress controller and communicate with the backend:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-network-policy
+  namespace: govtech
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 3000
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
+
+**Source:** `platform/kubernetes/network-policies.yaml:44-89`
+
+### Allowed Traffic
+
+**Ingress:**
+- HTTP (80) from Ingress controller in `kube-system` namespace
+
+**Egress:**
+- HTTP (3000) to backend pods
+- DNS (53 TCP/UDP) for name resolution
+
+## Backend Network Policy
+
+Allows backend to receive traffic from frontend/ingress and communicate with the database:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-network-policy
+  namespace: govtech
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 3000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+```
+
+**Source:** `platform/kubernetes/network-policies.yaml:97-155`
+
+### Allowed Traffic
+
+**Ingress:**
+- HTTP (3000) from frontend pods
+- HTTP (3000) from Ingress controller
+
+**Egress:**
+- PostgreSQL (5432) to database pods
+- HTTPS (443) to external AWS APIs (excluding private IP ranges)
+- DNS (53 TCP/UDP) for name resolution
+
+## Database Network Policy
+
+Strictly limits database access to backend only:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-network-policy
+  namespace: govtech
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+**Source:** `platform/kubernetes/network-policies.yaml:173-208`
+
+### Allowed Traffic
+
+**Ingress:**
+- PostgreSQL (5432) from backend pods only
+
+**Egress:**
+- DNS (53 UDP) for internal name resolution
+- No external connections allowed
+
+## AWS ALB Ingress
+
+Provides external HTTPS access via AWS Application Load Balancer:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: govtech-ingress
+  namespace: govtech
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:835960996869:certificate/CERTIFICATE_ARN_HERE
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+spec:
+  rules:
+    - host: govtech.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+```
+
+**Source:** `platform/kubernetes/ingress/ingress-aws.yaml:21-121`
+
+### Key Features
+
+- **Scheme:** Internet-facing ALB
+- **Target Type:** IP-based routing to pods
+- **SSL/TLS:** ACM certificate with automatic HTTP→HTTPS redirect
+- **Health Checks:** `/api/health` endpoint monitoring
+- **Routing:**
+  - `/api/*` → backend-service
+  - `/*` → frontend-service
+
+### ALB Configuration
+
+```yaml
+annotations:
+  alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+  alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+  alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+  alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+  alb.ingress.kubernetes.io/subnets: auto
+  alb.ingress.kubernetes.io/security-groups: auto
+  alb.ingress.kubernetes.io/tags: "Project=govtech,Environment=production,ManagedBy=kubernetes"
+```
+
+**Source:** `platform/kubernetes/ingress/ingress-aws.yaml:72-94`
+
+## NGINX Ingress (Alternative)
+
+For non-AWS environments or local testing:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: govtech-ingress-nginx
+  namespace: govtech
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/enable-compression: "true"
+spec:
+  rules:
+    - host: govtech.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+```
+
+**Source:** `platform/kubernetes/ingress/ingress-nginx.yaml:14-67`
+
+### Rate Limiting
+
+- **Max RPS:** 100 requests/second per IP
+- **Max Connections:** 20 simultaneous connections per IP
+- **Upload Limit:** 10MB request body size
+
+## Traffic Flow
+
+```
+Internet
+  ↓
+AWS ALB (HTTPS:443)
+  ↓
+Ingress Controller (kube-system)
+  ↓
+/api/* → backend-service:80 → backend pods:3000
+/*     → frontend-service:80 → frontend pods:80
+  ↓
+backend → postgres-service:5432 → postgres-0:5432
+```
+
+## Security Best Practices
+
+1. **Default Deny:** All traffic denied unless explicitly allowed
+2. **Least Privilege:** Each component has minimal required permissions
+3. **Layer Isolation:** Database cannot be accessed directly from frontend
+4. **External Access Control:** Only ALB can reach internal services
+5. **Private IP Exclusion:** Backend cannot access internal networks via internet

@@ -1,0 +1,745 @@
+---
+title: Troubleshooting Guide
+description: Common issues, solutions, and debugging procedures for the GovTech platform
+---
+
+## Overview
+
+This guide covers common operational issues and their solutions for the GovTech platform, organized by component.
+
+## Kubernetes Issues
+
+<AccordionGroup>
+  <Accordion title="Pod stuck in Pending state" icon="clock">
+    **Symptoms**: Pod remains in `Pending` status for more than 5 minutes
+    
+    **Common Causes**:
+    1. Insufficient cluster resources (CPU/memory)
+    2. PersistentVolumeClaim not bound
+    3. Node selector/affinity not matching any nodes
+    4. Image pull issues
+    
+    **Diagnosis**:
+    ```bash
+    # Check pod events
+    kubectl describe pod <pod-name> -n govtech
+    
+    # Check node resources
+    kubectl top nodes
+    kubectl describe nodes
+    
+    # Check PVC status
+    kubectl get pvc -n govtech
+    ```
+    
+    **Solutions**:
+    
+    <Steps>
+      <Step title="Resource Shortage">
+        Increase node count or upgrade instance types:
+        ```bash
+        # Scale node group
+        aws eks update-nodegroup-config \
+          --cluster-name govtech-prod \
+          --nodegroup-name govtech-nodes \
+          --scaling-config minSize=3,maxSize=10,desiredSize=5
+        ```
+      </Step>
+      
+      <Step title="PVC Not Bound">
+        Check storage class and provisioner:
+        ```bash
+        kubectl get sc
+        kubectl describe pvc <pvc-name> -n govtech
+        
+        # Ensure EBS CSI driver is installed
+        kubectl get pods -n kube-system | grep ebs-csi
+        ```
+      </Step>
+      
+      <Step title="Image Pull Failure">
+        Verify ECR access and image existence:
+        ```bash
+        # Check image pull secrets
+        kubectl get secrets -n govtech
+        
+        # Verify ECR repository
+        aws ecr describe-images \
+          --repository-name govtech-backend \
+          --image-ids imageTag=latest
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Pod in CrashLoopBackOff" icon="rotate">
+    **Symptoms**: Pod repeatedly starts and crashes
+    
+    **Diagnosis**:
+    ```bash
+    # View current logs
+    kubectl logs <pod-name> -n govtech
+    
+    # View previous container logs (before crash)
+    kubectl logs <pod-name> -n govtech --previous
+    
+    # Check pod events
+    kubectl describe pod <pod-name> -n govtech
+    ```
+    
+    **Common Causes & Solutions**:
+    
+    | Cause | Solution |
+    |-------|----------|
+    | Database connection failed | Verify DB_HOST in ConfigMap, check RDS security group |
+    | Missing environment variables | Check ConfigMap and Secrets are applied |
+    | Application error on startup | Review logs, fix code, redeploy |
+    | Health check failing too quickly | Increase `initialDelaySeconds` in probe |
+    | OOM (Out of Memory) | Increase memory limits in deployment |
+    
+    **Fix Health Check Timing**:
+    ```yaml
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 3000
+      initialDelaySeconds: 60  # Increase from 30
+      periodSeconds: 10
+      failureThreshold: 3
+    ```
+  </Accordion>
+
+  <Accordion title="Service not accessible" icon="network-wired">
+    **Symptoms**: Cannot reach application via LoadBalancer/Ingress
+    
+    **Diagnosis Steps**:
+    
+    <Steps>
+      <Step title="Check Pod Status">
+        ```bash
+        kubectl get pods -n govtech
+        # All pods should be Running and Ready (1/1 or 2/2)
+        ```
+      </Step>
+      
+      <Step title="Check Service">
+        ```bash
+        kubectl get svc -n govtech
+        kubectl describe svc backend -n govtech
+        
+        # Verify endpoints are populated
+        kubectl get endpoints backend -n govtech
+        ```
+      </Step>
+      
+      <Step title="Check Ingress/ALB">
+        ```bash
+        kubectl get ingress -n govtech
+        kubectl describe ingress govtech-ingress -n govtech
+        
+        # Check ALB Controller logs
+        kubectl logs -n kube-system \
+          -l app.kubernetes.io/name=aws-load-balancer-controller
+        ```
+      </Step>
+      
+      <Step title="Check Network Policies">
+        ```bash
+        kubectl get networkpolicy -n govtech
+        
+        # Test connectivity from one pod to another
+        kubectl exec -it deploy/frontend -n govtech -- \
+          curl http://backend:3000/health
+        ```
+      </Step>
+      
+      <Step title="Check Security Groups">
+        ```bash
+        # Get ALB security group
+        ALB_SG=$(aws elbv2 describe-load-balancers \
+          --query 'LoadBalancers[?contains(LoadBalancerName, `govtech`)].SecurityGroups[]' \
+          --output text)
+        
+        # Verify inbound rules allow 80/443
+        aws ec2 describe-security-groups --group-ids $ALB_SG
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="High pod restarts" icon="arrows-rotate">
+    **Symptoms**: Pod restart count increasing over time
+    
+    **Diagnosis**:
+    ```bash
+    # Check restart counts
+    kubectl get pods -n govtech
+    
+    # View events for specific pod
+    kubectl describe pod <pod-name> -n govtech
+    
+    # Check resource usage
+    kubectl top pods -n govtech
+    ```
+    
+    **Common Causes**:
+    
+    1. **OOM Kills**: Memory limit too low
+       ```yaml
+       resources:
+         limits:
+           memory: "512Mi"  # Increase this
+       ```
+    
+    2. **Liveness Probe Failing**: Application temporarily slow
+       ```yaml
+       livenessProbe:
+         failureThreshold: 5  # Increase tolerance
+         periodSeconds: 15    # Check less frequently
+       ```
+    
+    3. **Application Bugs**: Memory leaks, uncaught exceptions
+       - Review application logs
+       - Profile memory usage
+       - Update dependencies
+  </Accordion>
+
+  <Accordion title="HPA not scaling" icon="chart-line">
+    **Symptoms**: Horizontal Pod Autoscaler not creating new pods under load
+    
+    **Diagnosis**:
+    ```bash
+    # Check HPA status
+    kubectl get hpa -n govtech
+    kubectl describe hpa backend -n govtech
+    
+    # Check metrics server
+    kubectl top pods -n govtech
+    kubectl get apiservice v1beta1.metrics.k8s.io -o yaml
+    ```
+    
+    **Solutions**:
+    
+    <Tabs>
+      <Tab title="Metrics Server Missing">
+        ```bash
+        # Install metrics server
+        kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+        ```
+      </Tab>
+      
+      <Tab title="Resource Requests Not Set">
+        HPA requires `resources.requests` to be defined:
+        
+        ```yaml
+        resources:
+          requests:  # REQUIRED for HPA
+            cpu: "100m"
+            memory: "256Mi"
+        ```
+      </Tab>
+      
+      <Tab title="Already at Max">
+        ```bash
+        # Check if at maximum replicas
+        kubectl get hpa backend -n govtech
+        
+        # Increase max if needed
+        kubectl patch hpa backend -n govtech -p \
+          '{"spec":{"maxReplicas":15}}'
+        ```
+      </Tab>
+    </Tabs>
+  </Accordion>
+</AccordionGroup>
+
+## Database Issues
+
+<AccordionGroup>
+  <Accordion title="Cannot connect to database" icon="database">
+    **Symptoms**: Application logs show database connection errors
+    
+    **Diagnosis Checklist**:
+    
+    - [ ] **Verify database is running**
+      ```bash
+      # For RDS
+      aws rds describe-db-instances \
+        --db-instance-identifier govtech-prod-postgres \
+        --query 'DBInstances[0].DBInstanceStatus'
+      
+      # For pod
+      kubectl get pods -l app=postgres -n govtech
+      ```
+    
+    - [ ] **Check connection string**
+      ```bash
+      kubectl get configmap govtech-config -n govtech -o yaml | grep DB_
+      ```
+    
+    - [ ] **Verify credentials**
+      ```bash
+      kubectl get secret govtech-secrets -n govtech -o yaml
+      # Decode values: echo "BASE64" | base64 -d
+      ```
+    
+    - [ ] **Test connectivity from pod**
+      ```bash
+      kubectl exec -it deploy/backend -n govtech -- \
+        nc -zv $DB_HOST 5432
+      
+      # Or with psql
+      kubectl exec -it deploy/backend -n govtech -- \
+        psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "SELECT 1;"
+      ```
+    
+    - [ ] **Check security groups (RDS)**
+      ```bash
+      # RDS security group must allow inbound from EKS node security group
+      aws rds describe-db-instances \
+        --db-instance-identifier govtech-prod-postgres \
+        --query 'DBInstances[0].VpcSecurityGroups'
+      ```
+  </Accordion>
+
+  <Accordion title="Database slow query performance" icon="gauge-high">
+    **Symptoms**: Requests timing out, high latency on database operations
+    
+    **Diagnosis**:
+    
+    ```sql
+    -- Connect to database
+    psql -h <DB_HOST> -U govtech_admin -d govtech
+    
+    -- Check active queries
+    SELECT pid, usename, state, query_start, query 
+    FROM pg_stat_activity 
+    WHERE state != 'idle' 
+    ORDER BY query_start;
+    
+    -- Find slow queries
+    SELECT query, calls, total_time, mean_time 
+    FROM pg_stat_statements 
+    ORDER BY mean_time DESC 
+    LIMIT 10;
+    
+    -- Check table sizes
+    SELECT schemaname, tablename, 
+           pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+    FROM pg_tables 
+    WHERE schemaname = 'public' 
+    ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+    ```
+    
+    **Solutions**:
+    
+    1. **Add missing indexes**
+       ```sql
+       -- Find tables with sequential scans
+       SELECT schemaname, tablename, seq_scan, seq_tup_read, 
+              idx_scan, idx_tup_fetch
+       FROM pg_stat_user_tables
+       WHERE seq_scan > 1000
+       ORDER BY seq_tup_read DESC;
+       ```
+    
+    2. **Increase RDS instance size**
+       ```bash
+       aws rds modify-db-instance \
+         --db-instance-identifier govtech-prod-postgres \
+         --db-instance-class db.t3.medium \
+         --apply-immediately
+       ```
+    
+    3. **Enable connection pooling**
+       Use PgBouncer or increase `max_connections`
+  </Accordion>
+
+  <Accordion title="Database disk full" icon="hard-drive">
+    **Symptoms**: Database writes failing, application errors
+    
+    **Check Disk Usage**:
+    ```bash
+    # For RDS
+    aws cloudwatch get-metric-statistics \
+      --namespace AWS/RDS \
+      --metric-name FreeStorageSpace \
+      --dimensions Name=DBInstanceIdentifier,Value=govtech-prod-postgres \
+      --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+      --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+      --period 300 \
+      --statistics Average
+    ```
+    
+    **Immediate Fix (RDS)**:
+    ```bash
+    # Increase storage
+    aws rds modify-db-instance \
+      --db-instance-identifier govtech-prod-postgres \
+      --allocated-storage 50 \
+      --apply-immediately
+    ```
+    
+    **Long-term Solutions**:
+    - Enable storage autoscaling
+    - Archive old data
+    - Run VACUUM to reclaim space
+    - Delete old backups in S3
+  </Accordion>
+</AccordionGroup>
+
+## Networking Issues
+
+<AccordionGroup>
+  <Accordion title="NetworkPolicy blocking legitimate traffic" icon="shield">
+    **Symptoms**: Pods cannot communicate despite correct service configuration
+    
+    **Diagnosis**:
+    ```bash
+    # List NetworkPolicies
+    kubectl get networkpolicy -n govtech
+    
+    # Describe specific policy
+    kubectl describe networkpolicy allow-backend-to-database -n govtech
+    
+    # Test connectivity
+    kubectl exec -it deploy/frontend -n govtech -- \
+      nc -zv backend 3000
+    ```
+    
+    **Verify Policy Labels**:
+    ```bash
+    # Check pod labels
+    kubectl get pods -n govtech --show-labels
+    
+    # Ensure labels match NetworkPolicy selectors
+    kubectl get networkpolicy -n govtech -o yaml | grep -A 5 podSelector
+    ```
+    
+    **Temporarily Disable Policy** (debugging only):
+    ```bash
+    kubectl delete networkpolicy <policy-name> -n govtech
+    # Test if connectivity restored
+    # Then recreate policy with correct selectors
+    ```
+  </Accordion>
+
+  <Accordion title="ALB not created or not healthy" icon="load-balancer">
+    **Symptoms**: Ingress has no ADDRESS, ALB health checks failing
+    
+    **Check ALB Controller**:
+    ```bash
+    # Check controller pod
+    kubectl get pods -n kube-system \
+      -l app.kubernetes.io/name=aws-load-balancer-controller
+    
+    # View controller logs
+    kubectl logs -n kube-system \
+      -l app.kubernetes.io/name=aws-load-balancer-controller \
+      --tail=100
+    ```
+    
+    **Common Issues**:
+    
+    1. **Missing IAM permissions**
+       - Controller needs IAM role with ALB creation permissions
+       - Check IRSA (IAM Roles for Service Accounts) configuration
+    
+    2. **Incorrect Ingress annotations**
+       ```yaml
+       annotations:
+         kubernetes.io/ingress.class: alb
+         alb.ingress.kubernetes.io/scheme: internet-facing
+         alb.ingress.kubernetes.io/target-type: ip
+         alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+       ```
+    
+    3. **Subnet tags missing**
+       ```bash
+       # Public subnets must have this tag for ALB
+       aws ec2 describe-subnets \
+         --filters "Name=tag:kubernetes.io/role/elb,Values=1" \
+         --query 'Subnets[*].SubnetId'
+       ```
+  </Accordion>
+
+  <Accordion title="DNS resolution failing" icon="globe">
+    **Symptoms**: Pods cannot resolve external domains or internal services
+    
+    **Test DNS**:
+    ```bash
+    # Test external DNS
+    kubectl run -it --rm debug --image=busybox --restart=Never -- \
+      nslookup google.com
+    
+    # Test internal service DNS
+    kubectl run -it --rm debug --image=busybox --restart=Never -- \
+      nslookup backend.govtech.svc.cluster.local
+    ```
+    
+    **Check CoreDNS**:
+    ```bash
+    # Check CoreDNS pods
+    kubectl get pods -n kube-system -l k8s-app=kube-dns
+    
+    # View CoreDNS logs
+    kubectl logs -n kube-system -l k8s-app=kube-dns
+    
+    # Restart CoreDNS if needed
+    kubectl rollout restart deployment/coredns -n kube-system
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## CI/CD Issues
+
+<AccordionGroup>
+  <Accordion title="GitHub Actions workflow failing" icon="github">
+    **Common Failures & Solutions**:
+    
+    | Error | Cause | Solution |
+    |-------|-------|----------|
+    | `Error: No space left on device` | Runner disk full | Clean up old Docker images, use larger runner |
+    | `Permission denied (publickey)` | SSH key issue | Check deploy keys in repo settings |
+    | `Error: OIDC token expired` | AWS authentication timeout | Increase timeout, check OIDC provider config |
+    | `Trivy scan found vulnerabilities` | Security issues in image | Update dependencies, review CVEs |
+    
+    **View Workflow Logs**:
+    ```bash
+    # Using GitHub CLI
+    gh run list --repo your-org/govtech
+    gh run view <run-id> --log
+    ```
+  </Accordion>
+
+  <Accordion title="Docker image build failing" icon="docker">
+    **Common Issues**:
+    
+    1. **Base image not found**
+       ```dockerfile
+       # Use specific version tags, not 'latest'
+       FROM node:20-alpine
+       ```
+    
+    2. **Build context too large**
+       - Add `.dockerignore` file
+       - Exclude node_modules, .git, etc.
+    
+    3. **Multi-stage build failing**
+       - Check each stage independently
+       - Verify COPY paths between stages
+  </Accordion>
+
+  <Accordion title="Deployment rollout stuck" icon="circle-pause">
+    **Symptoms**: `kubectl rollout status` never completes
+    
+    ```bash
+    # Check rollout status
+    kubectl rollout status deployment/backend -n govtech
+    
+    # View rollout history
+    kubectl rollout history deployment/backend -n govtech
+    
+    # Check pod events
+    kubectl describe deployment backend -n govtech
+    ```
+    
+    **Common Causes**:
+    - New image has errors (CrashLoopBackOff)
+    - Readiness probe failing
+    - Insufficient resources for new pods
+    
+    **Rollback**:
+    ```bash
+    kubectl rollout undo deployment/backend -n govtech
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Monitoring & Alerts
+
+<AccordionGroup>
+  <Accordion title="Prometheus not scraping metrics" icon="chart-line">
+    **Check Targets**:
+    ```bash
+    # Port-forward to Prometheus
+    kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+    ```
+    
+    Open http://localhost:9090/targets and look for:
+    - **Red targets**: Scrape failing
+    - **Unknown targets**: ServiceMonitor not discovered
+    
+    **Verify ServiceMonitor**:
+    ```bash
+    kubectl get servicemonitor -n govtech
+    kubectl describe servicemonitor backend-monitor -n govtech
+    
+    # Check labels match Prometheus selector
+    kubectl get servicemonitor backend-monitor -n govtech -o yaml | grep -A 3 labels
+    ```
+    
+    **Application Must Expose /metrics**:
+    ```bash
+    kubectl exec -it deploy/backend -n govtech -- \
+      curl http://localhost:3000/metrics
+    ```
+  </Accordion>
+
+  <Accordion title="Grafana dashboard shows no data" icon="chart-bar">
+    **Troubleshooting Steps**:
+    
+    1. **Check Prometheus datasource**
+       - Grafana > Configuration > Data Sources
+       - Test connection
+       - Verify URL: `http://prometheus-service.monitoring.svc.cluster.local:9090`
+    
+    2. **Test query in Prometheus**
+       - Run query directly in Prometheus UI
+       - Ensure metrics exist before troubleshooting Grafana
+    
+    3. **Check time range**
+       - Metrics may not exist in selected time range
+       - Try "Last 5 minutes"
+  </Accordion>
+
+  <Accordion title="Alerts not firing or not received" icon="bell">
+    **Check Alert Rules**:
+    ```bash
+    # Port-forward to Prometheus
+    kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+    ```
+    
+    Open http://localhost:9090/alerts to see:
+    - **Inactive**: Rule defined but condition not met
+    - **Pending**: Condition met, waiting for `for` duration
+    - **Firing**: Alert active, sent to Alertmanager
+    
+    **Check Alertmanager**:
+    ```bash
+    kubectl port-forward -n monitoring svc/prometheus-alertmanager 9093:9093
+    ```
+    
+    Open http://localhost:9093 to verify:
+    - Alerts received
+    - Routing configuration
+    - Silences (may be muting alerts)
+  </Accordion>
+</AccordionGroup>
+
+## Security Issues
+
+<AccordionGroup>
+  <Accordion title="GuardDuty finding: Unusual API activity" icon="shield-halved">
+    **Response Steps**:
+    
+    1. **Review CloudTrail logs**
+       ```bash
+       aws cloudtrail lookup-events \
+         --lookup-attributes AttributeKey=EventName,AttributeValue=<API_CALL> \
+         --max-results 50
+       ```
+    
+    2. **Identify affected user/role**
+       - Check `userIdentity` in CloudTrail events
+       - Verify if activity was legitimate
+    
+    3. **If compromised, revoke credentials**
+       ```bash
+       # Disable access key
+       aws iam update-access-key \
+         --access-key-id AKIA... \
+         --status Inactive \
+         --user-name <username>
+       
+       # Rotate credentials immediately
+       ```
+  </Accordion>
+
+  <Accordion title="Pod Security Standards violation" icon="lock">
+    **Symptoms**: Pod creation rejected with security policy error
+    
+    **Check Namespace Policy**:
+    ```bash
+    kubectl get namespace govtech -o yaml | grep pod-security
+    ```
+    
+    **Common Violations**:
+    
+    | Violation | Solution |
+    |-----------|----------|
+    | Running as root | Add `securityContext.runAsNonRoot: true` |
+    | Privileged container | Remove `privileged: true` |
+    | Host path mount | Use PersistentVolume instead |
+    | Host network | Remove `hostNetwork: true` |
+    
+    **Fix Example**:
+    ```yaml
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 1000
+      capabilities:
+        drop:
+          - ALL
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Useful Debugging Commands
+
+```bash
+# Get all resources in namespace
+kubectl get all -n govtech
+
+# Describe everything (verbose troubleshooting)
+kubectl describe all -n govtech
+
+# View events (sorted by time)
+kubectl get events -n govtech --sort-by='.lastTimestamp'
+
+# Check resource usage
+kubectl top pods -n govtech
+kubectl top nodes
+
+# Interactive shell in pod
+kubectl exec -it deploy/backend -n govtech -- /bin/sh
+
+# Port-forward for local testing
+kubectl port-forward svc/backend 3000:3000 -n govtech
+
+# Copy files from pod
+kubectl cp govtech/backend-xxx:/tmp/debug.log ./debug.log
+
+# Run temporary debug pod
+kubectl run debug --image=nicolaka/netshoot -it --rm -n govtech
+
+# View full YAML of resource
+kubectl get deployment backend -n govtech -o yaml
+
+# Check API server logs (EKS)
+aws eks describe-cluster --name govtech-prod \
+  --query 'cluster.logging'
+```
+
+## Emergency Contacts
+
+For critical production issues:
+
+| Severity | Response Time | Contact |
+|----------|--------------|----------|
+| Critical (P0) | 15 minutes | On-call engineer (phone) |
+| High (P1) | 1 hour | Slack #govtech-alerts |
+| Medium (P2) | 4 hours | Slack #govtech-devops |
+| Low (P3) | Next business day | Ticket system |
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Dashboards and alerting setup
+  </Card>
+  <Card title="Disaster Recovery" icon="life-ring" href="/operations/disaster-recovery">
+    DR procedures and runbooks
+  </Card>
+</CardGroup>

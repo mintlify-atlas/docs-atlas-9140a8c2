@@ -1,0 +1,437 @@
+---
+title: Azure implementation
+description: Microsoft Azure implementation guide for the GovTech platform
+---
+
+This guide shows how to implement the GovTech platform on Microsoft Azure. The service interfaces are already defined - you just need to implement the Azure-specific code.
+
+<Note>
+**Status:** Structure ready. Implementation time: 3-4 days.
+
+All service interfaces are defined and the Factory pattern is in place. You only need to implement the 4 service classes for Azure.
+</Note>
+
+## Azure services mapping
+
+| Platform Service | Azure Service | SDK Package |
+|---|---|---|
+| StorageService | Blob Storage | `@azure/storage-blob` |
+| DatabaseService | Azure Database for PostgreSQL | `pg` (standard PostgreSQL) |
+| MonitoringService | Azure Monitor | `@azure/monitor-query` |
+| AuthService | Azure Active Directory | `@azure/identity` |
+| Kubernetes | Azure Kubernetes Service (AKS) | `@azure/arm-containerservice` |
+| Container Registry | Azure Container Registry (ACR) | Built-in |
+| Secrets | Azure Key Vault | `@azure/keyvault-secrets` |
+
+## Implementation steps
+
+<Steps>
+  <Step title="Install Azure SDKs">
+    Install the Azure client libraries:
+    
+    ```bash npm
+    npm install @azure/storage-blob \
+      @azure/identity \
+      @azure/monitor-query \
+      @azure/keyvault-secrets \
+      pg
+    ```
+  </Step>
+  
+  <Step title="Configure Azure credentials">
+    Set up environment variables:
+    
+    ```env
+    CLOUD_PROVIDER=azure
+    AZURE_TENANT_ID=your-tenant-id
+    AZURE_CLIENT_ID=your-client-id
+    AZURE_CLIENT_SECRET=your-client-secret
+    AZURE_SUBSCRIPTION_ID=your-subscription-id
+    AZURE_STORAGE_ACCOUNT=govtechstorage
+    ```
+  </Step>
+  
+  <Step title="Create service principal">
+    ```bash
+    az ad sp create-for-rbac \
+      --name govtech-backend \
+      --role Contributor \
+      --scopes /subscriptions/{subscription-id}
+    ```
+    
+    Save the output (appId, password, tenant) to your environment variables.
+  </Step>
+  
+  <Step title="Implement service classes">
+    Create the 4 service implementation files in `app/backend/src/services/providers/azure/`:
+    
+    - `azure-storage.service.js`
+    - `azure-database.service.js`
+    - `azure-monitoring.service.js`
+    - `azure-auth.service.js`
+  </Step>
+  
+  <Step title="Update the Factory">
+    Uncomment the Azure section in `src/services/factory.js`:
+    
+    ```javascript
+    const PROVIDERS = {
+      aws: { /* ... */ },
+      azure: {
+        storage:    () => new AzureStorageService(),
+        database:   () => new AzureDatabaseService(),
+        monitoring: () => new AzureMonitoringService(),
+        auth:       () => new AzureAuthService(),
+      },
+    };
+    ```
+  </Step>
+</Steps>
+
+## StorageService implementation
+
+Here's the complete implementation for Azure Blob Storage:
+
+```javascript azure-storage.service.js
+// app/backend/src/services/providers/azure/azure-storage.service.js
+const { BlobServiceClient } = require('@azure/storage-blob');
+const { DefaultAzureCredential } = require('@azure/identity');
+
+class AzureStorageService {
+  constructor() {
+    const accountName = process.env.AZURE_STORAGE_ACCOUNT;
+    const blobServiceClient = new BlobServiceClient(
+      `https://${accountName}.blob.core.windows.net`,
+      new DefaultAzureCredential()
+    );
+    this.blobServiceClient = blobServiceClient;
+  }
+
+  async uploadFile(containerName, blobName, body, contentType) {
+    const containerClient = this.blobServiceClient.getContainerClient(containerName);
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+    
+    await blockBlobClient.upload(body, body.length, {
+      blobHTTPHeaders: { blobContentType: contentType },
+    });
+    
+    return { key: blobName, containerName };
+  }
+
+  async downloadFile(containerName, blobName) {
+    const containerClient = this.blobServiceClient.getContainerClient(containerName);
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+    
+    const downloadResponse = await blockBlobClient.download();
+    const chunks = [];
+    
+    for await (const chunk of downloadResponse.readableStreamBody) {
+      chunks.push(chunk);
+    }
+    
+    return Buffer.concat(chunks);
+  }
+
+  async deleteFile(containerName, blobName) {
+    const containerClient = this.blobServiceClient.getContainerClient(containerName);
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+    await blockBlobClient.delete();
+    return { deleted: true };
+  }
+
+  async listFiles(containerName, prefix = '') {
+    const containerClient = this.blobServiceClient.getContainerClient(containerName);
+    const blobs = [];
+    
+    for await (const blob of containerClient.listBlobsFlat({ prefix })) {
+      blobs.push({
+        key: blob.name,
+        size: blob.properties.contentLength,
+        lastModified: blob.properties.lastModified,
+      });
+    }
+    
+    return blobs;
+  }
+
+  async getSignedUrl(containerName, blobName, expiresInSeconds = 3600) {
+    const containerClient = this.blobServiceClient.getContainerClient(containerName);
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+    
+    const expiryDate = new Date();
+    expiryDate.setSeconds(expiryDate.getSeconds() + expiresInSeconds);
+    
+    const sasUrl = await blockBlobClient.generateSasUrl({
+      permissions: 'r',
+      expiresOn: expiryDate,
+    });
+    
+    return sasUrl;
+  }
+}
+
+module.exports = { AzureStorageService };
+```
+
+## DatabaseService implementation
+
+```javascript azure-database.service.js
+// app/backend/src/services/providers/azure/azure-database.service.js
+const { Pool } = require('pg');
+
+class AzureDatabaseService {
+  constructor() {
+    // Azure Database for PostgreSQL uses standard PostgreSQL protocol
+    this.pool = new Pool({
+      host: process.env.AZURE_DB_HOST, // e.g., govtech.postgres.database.azure.com
+      port: process.env.DB_PORT || 5432,
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER, // e.g., adminuser@govtech
+      password: process.env.DB_PASSWORD,
+      ssl: {
+        rejectUnauthorized: false, // Azure requires SSL
+      },
+      max: 20,
+      idleTimeoutMillis: 30000
+    });
+  }
+
+  async query(sql, params = []) {
+    const result = await this.pool.query(sql, params);
+    return { rows: result.rows, rowCount: result.rowCount };
+  }
+
+  async beginTransaction() {
+    const client = await this.pool.connect();
+    await client.query('BEGIN');
+    return client;
+  }
+
+  async commitTransaction(client) {
+    await client.query('COMMIT');
+    client.release();
+  }
+
+  async rollbackTransaction(client) {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+
+  async ping() {
+    const start = Date.now();
+    try {
+      await this.pool.query('SELECT 1');
+      return { status: 'healthy', latencyMs: Date.now() - start };
+    } catch (error) {
+      return { status: 'unhealthy', error: error.message };
+    }
+  }
+}
+
+module.exports = { AzureDatabaseService };
+```
+
+## MonitoringService implementation
+
+```javascript azure-monitoring.service.js
+// app/backend/src/services/providers/azure/azure-monitoring.service.js
+const { MetricsQueryClient } = require('@azure/monitor-query');
+const { DefaultAzureCredential } = require('@azure/identity');
+
+class AzureMonitoringService {
+  constructor() {
+    this.metricsClient = new MetricsQueryClient(new DefaultAzureCredential());
+    this.subscriptionId = process.env.AZURE_SUBSCRIPTION_ID;
+  }
+
+  async putMetric(namespace, metricName, value, unit = 'Count') {
+    // Azure Monitor uses Application Insights for custom metrics
+    // For simplicity, log to console (in production, use App Insights SDK)
+    console.log(`[METRIC] ${namespace}/${metricName}: ${value} ${unit}`);
+    return { success: true };
+  }
+
+  async logEvent(logGroup, message, level = 'INFO') {
+    // Use Azure Monitor Logs
+    console.log(`[${level}] ${logGroup}: ${message}`);
+  }
+
+  async createAlarm(alarmName, metricName, threshold, comparison) {
+    // Azure Monitor Alerts are typically created via ARM templates or Portal
+    console.log(`Creating alarm: ${alarmName} for ${metricName} ${comparison} ${threshold}`);
+    return { success: true };
+  }
+
+  async getMetrics(namespace, metricName, periodMinutes = 60) {
+    // Query metrics from Azure Monitor
+    const startTime = new Date(Date.now() - periodMinutes * 60 * 1000);
+    const endTime = new Date();
+    
+    // This is a placeholder - actual implementation would query Azure Monitor
+    return [];
+  }
+}
+
+module.exports = { AzureMonitoringService };
+```
+
+## AuthService implementation
+
+```javascript azure-auth.service.js
+// app/backend/src/services/providers/azure/azure-auth.service.js
+const jwt = require('jsonwebtoken');
+const { DefaultAzureCredential } = require('@azure/identity');
+
+class AzureAuthService {
+  constructor() {
+    this.credential = new DefaultAzureCredential();
+    this.jwtSecret = process.env.JWT_SECRET || 'your-secret-key';
+  }
+
+  async verifyToken(token) {
+    try {
+      const decoded = jwt.verify(token, this.jwtSecret);
+      return { userId: decoded.userId, roles: decoded.roles, valid: true };
+    } catch (error) {
+      return { valid: false, error: error.message };
+    }
+  }
+
+  async getUserPermissions(userId) {
+    // Implement based on Azure AD roles
+    return ['read:documents', 'write:documents'];
+  }
+
+  async generateToken(userId, roles = []) {
+    return jwt.sign(
+      { userId, roles },
+      this.jwtSecret,
+      { expiresIn: '24h' }
+    );
+  }
+
+  async revokeToken(token) {
+    console.log(`Token revoked: ${token}`);
+  }
+}
+
+module.exports = { AzureAuthService };
+```
+
+## Terraform for AKS
+
+Create Azure infrastructure with Terraform:
+
+```hcl terraform/azure/main.tf
+resource "azurerm_kubernetes_cluster" "govtech" {
+  name                = "govtech-aks"
+  location            = "East US"
+  resource_group_name = azurerm_resource_group.govtech.name
+  dns_prefix          = "govtech"
+  
+  default_node_pool {
+    name       = "default"
+    node_count = 3
+    vm_size    = "Standard_B2s"
+  }
+  
+  identity {
+    type = "SystemAssigned"
+  }
+}
+
+resource "azurerm_postgresql_server" "govtech" {
+  name                = "govtech-postgres"
+  location            = "East US"
+  resource_group_name = azurerm_resource_group.govtech.name
+  
+  sku_name = "B_Gen5_1"
+  version  = "11"
+  
+  storage_mb        = 5120
+  backup_retention_days = 7
+  geo_redundant_backup_enabled = false
+  
+  administrator_login          = "adminuser"
+  administrator_login_password = var.db_password
+  ssl_enforcement_enabled      = true
+}
+
+resource "azurerm_container_registry" "govtech" {
+  name                = "govtechacr"
+  resource_group_name = azurerm_resource_group.govtech.name
+  location            = "East US"
+  sku                 = "Basic"
+  admin_enabled       = true
+}
+```
+
+## Managed Identity
+
+Use Azure Managed Identity for secure authentication (Azure's equivalent to AWS IRSA):
+
+```bash
+# Enable managed identity on AKS
+az aks update \
+  --resource-group govtech-rg \
+  --name govtech-aks \
+  --enable-managed-identity
+
+# Create user-assigned managed identity
+az identity create \
+  --resource-group govtech-rg \
+  --name govtech-backend-identity
+
+# Assign permissions
+az role assignment create \
+  --assignee <identity-client-id> \
+  --role "Storage Blob Data Contributor" \
+  --scope /subscriptions/{subscription-id}/resourceGroups/govtech-rg
+```
+
+## Testing
+
+Test your Azure implementation:
+
+```bash
+# Set Azure provider
+export CLOUD_PROVIDER=azure
+export AZURE_STORAGE_ACCOUNT=govtechstorage
+
+# Test storage
+curl -X POST http://localhost:3000/api/storage/upload \
+  -F "file=@test.txt"
+
+# Test database
+curl http://localhost:3000/api/health/database
+
+# Test monitoring
+curl http://localhost:3000/api/metrics
+```
+
+## Cost comparison
+
+Azure pricing (similar to AWS):
+
+| Service | Azure Cost | AWS Equivalent |
+|---|---|---|
+| AKS Cluster | Free | $73/month (EKS) |
+| Standard_B2s (2 vCPUs, 4GB) | $30/month | $30/month (t3.medium) |
+| PostgreSQL Basic | $25/month | $50/month (RDS Multi-AZ) |
+| Blob Storage (100 GB) | $2/month | $2.30/month (S3) |
+| **Total** | **~$340/month** | **~$335/month** |
+
+<Tip>
+Azure offers significant discounts through Enterprise Agreements (EA) - up to 40% off for large organizations.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Migration Guide" icon="shuffle" href="/multicloud/migration-guide">
+    Migrate from AWS to Azure
+  </Card>
+  <Card title="Provider Comparison" icon="scale-balanced" href="/multicloud/provider-comparison">
+    Compare all providers
+  </Card>
+</CardGroup>

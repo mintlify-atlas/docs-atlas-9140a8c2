@@ -1,0 +1,256 @@
+---
+title: Architecture Overview
+description: High-level architecture of the GovTech Multicloud Platform
+---
+
+## System Architecture
+
+The GovTech Multicloud Platform follows a **defense-in-depth** security model with multiple layers of protection at every level of the infrastructure. The platform is designed for government agencies migrating legacy systems to cloud infrastructure.
+
+### Architecture Diagram
+
+```
+Internet
+    |
+    v
+[Route53 DNS] → govtech.example.com
+    |
+    v
+[WAF] ← Blocks: SQL injection, XSS, bots, rate limit (5 AWS Managed Rules)
+    |
+    v
+[AWS ALB] ← AWS Load Balancer Controller (EKS) | HTTPS required (ACM)
+    |
+    ├── /api/* → Backend Service (ClusterIP :3000)
+    └── /*     → Frontend Service (ClusterIP :80)
+                        |
+         [NetworkPolicies: Zero-Trust]
+              ┌─────────v──────────┐
+              │    EKS Cluster      │
+              │  (Private Subnets)  │
+              │                    │
+              │  ┌──────────────┐  │
+              │  │   frontend   │  │ ← React/Nginx, SA: govtech-frontend
+              │  │  (2-8 pods)  │  │   (no secrets/DB permissions)
+              │  └──────┬───────┘  │
+              │         │ :3000    │
+              │  ┌──────v───────┐  │
+              │  │   backend    │  │ ← Node.js, SA: govtech-backend (IRSA)
+              │  │  (2-10 pods) │  │   (accesses Secrets Manager via IAM Role)
+              │  └──────┬───────┘  │
+              │         │ :5432    │
+              │  ┌──────v───────┐  │
+              │  │   postgres   │  │ ← StatefulSet, SA: govtech-database
+              │  │  (1 pod)     │  │   (receive only, no outbound)
+              │  └──────────────┘  │
+              └────────────────────┘
+                        |
+              ┌─────────v──────────┐
+              │  AWS Services       │
+              │  - RDS PostgreSQL   │ ← Production: Multi-AZ, KMS encrypted
+              │  - S3 Bucket        │ ← Files, versioning, lifecycle rules
+              │  - Secrets Manager  │ ← DB credentials + JWT, auto-rotation
+              │  - ECR              │ ← Docker images, auto-scan
+              └────────────────────┘
+                        |
+              ┌─────────v──────────┐
+              │  Security & Audit  │
+              │  - CloudTrail       │ ← Audit ALL AWS actions
+              │  - GuardDuty        │ ← Automatic IDS with ML
+              │  - Security Hub     │ ← CIS Benchmark + Best Practices
+              │  - KMS              │ ← Centralized encryption
+              │  - Cost Anomaly     │ ← Unusual spend alerts
+              └────────────────────┘
+```
+
+## Core Components
+
+### Application Layer
+
+<CardGroup cols={2}>
+  <Card title="Frontend" icon="browser">
+    - **Technology**: React + Nginx
+    - **Deployment**: 2-8 pods (HPA)
+    - **Port**: 80
+    - **Image**: `835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-frontend`
+  </Card>
+  
+  <Card title="Backend API" icon="server">
+    - **Technology**: Node.js 20 + Express
+    - **Deployment**: 2-10 pods (HPA)
+    - **Port**: 3000
+    - **Image**: `835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend`
+  </Card>
+  
+  <Card title="Database" icon="database">
+    - **Technology**: PostgreSQL 15
+    - **Development**: StatefulSet in EKS
+    - **Production**: RDS Multi-AZ
+    - **Port**: 5432
+  </Card>
+  
+  <Card title="Storage" icon="folder">
+    - **Service**: AWS S3
+    - **Features**: Versioning, lifecycle rules
+    - **Access**: IRSA (IAM Roles for Service Accounts)
+  </Card>
+</CardGroup>
+
+### Infrastructure Components
+
+| Component | Type | Purpose |
+|-----------|------|----------|
+| **VPC** | AWS Networking | Isolated network (10.0.0.0/16 dev, 10.1.0.0/16 staging, 10.2.0.0/16 prod) |
+| **EKS** | Kubernetes | Container orchestration (govtech-dev/staging/prod) |
+| **RDS** | Managed PostgreSQL | Relational database with Multi-AZ in production |
+| **ECR** | Container Registry | Docker images with automatic vulnerability scanning |
+| **ALB** | Load Balancer | HTTPS routing with WAF protection |
+| **NAT Gateway** | Network | Private subnet internet access (one per AZ) |
+
+## Deployment Environments
+
+<Tabs>
+  <Tab title="Development">
+    - **Cluster**: govtech-dev
+    - **VPC CIDR**: 10.0.0.0/16
+    - **Nodes**: 2-4 x t3.small
+    - **RDS**: db.t3.micro (Single-AZ)
+    - **AZs**: us-east-1a, us-east-1b
+    - **Cost**: ~$180/month
+  </Tab>
+  
+  <Tab title="Staging">
+    - **Cluster**: govtech-staging
+    - **VPC CIDR**: 10.1.0.0/16
+    - **Nodes**: 2-6 x t3.small
+    - **RDS**: db.t3.small (Single-AZ)
+    - **AZs**: us-east-1a, us-east-1b, us-east-1c
+    - **Cost**: ~$200/month
+  </Tab>
+  
+  <Tab title="Production">
+    - **Cluster**: govtech-prod
+    - **VPC CIDR**: 10.2.0.0/16
+    - **Nodes**: 3-10 x t3.medium
+    - **RDS**: db.t3.small (Multi-AZ)
+    - **AZs**: us-east-1a, us-east-1b, us-east-1c
+    - **Cost**: ~$335/month
+  </Tab>
+</Tabs>
+
+## Key Design Principles
+
+<AccordionGroup>
+  <Accordion title="Zero-Trust Networking">
+    All pod-to-pod communication is explicitly defined using Kubernetes NetworkPolicies:
+    - Frontend can only communicate with Backend
+    - Backend can only communicate with Database and AWS services
+    - Database accepts connections only from Backend
+    - Default deny all traffic, then allow specific flows
+  </Accordion>
+  
+  <Accordion title="Least Privilege Access">
+    Each component has minimal required permissions:
+    - IRSA (IAM Roles for Service Accounts) instead of hardcoded credentials
+    - Service accounts: `govtech-frontend`, `govtech-backend`, `govtech-database`
+    - Backend can access S3 and Secrets Manager, frontend cannot
+    - Database has no outbound AWS permissions
+  </Accordion>
+  
+  <Accordion title="Encryption Everywhere">
+    All data encrypted in transit and at rest:
+    - **In Transit**: TLS 1.2+ (ALB, RDS, internal K8s)
+    - **At Rest**: AES-256 (RDS, S3, EBS volumes, etcd)
+    - **Keys**: AWS KMS with automatic rotation
+    - **Secrets**: AWS Secrets Manager (not K8s secrets in production)
+  </Accordion>
+  
+  <Accordion title="Infrastructure as Code">
+    Everything defined in version control:
+    - **Terraform**: VPC, EKS, RDS, security services
+    - **Kubernetes YAML**: Deployments, services, network policies
+    - **State**: S3 backend with versioning and encryption
+    - **Reproducible**: Entire environment in 30 minutes
+  </Accordion>
+</AccordionGroup>
+
+## Resource Configuration Examples
+
+### Backend Deployment Spec
+
+```yaml kubernetes/backend/deployment.yaml
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"      # 0.25 cores minimum
+  limits:
+    memory: "512Mi"
+    cpu: "500m"      # 0.5 cores maximum
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+```
+
+### Horizontal Pod Autoscaler
+
+```yaml kubernetes/backend/hpa.yaml
+spec:
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+## Terraform State Management
+
+```
+s3://govtech-terraform-state-835960996869/
+├── terraform.tfstate          # Global (ECR repos, OIDC provider)
+├── dev/terraform.tfstate      # Development environment
+├── staging/terraform.tfstate  # Staging environment
+└── prod/terraform.tfstate     # Production environment
+```
+
+<Info>
+All Terraform state buckets have:
+- Versioning enabled (recover previous states)
+- KMS encryption
+- Public access blocked
+- 90-day retention for deleted objects
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Cloud Design" icon="cloud" href="/architecture/multicloud-design">
+    Learn about portability and cloud provider abstraction
+  </Card>
+  
+  <Card title="Security Layers" icon="shield" href="/architecture/security-layers">
+    Deep dive into defense-in-depth security model
+  </Card>
+  
+  <Card title="Network Topology" icon="network-wired" href="/architecture/network-topology">
+    VPC, subnets, and routing configuration
+  </Card>
+  
+  <Card title="Scalability" icon="chart-line" href="/architecture/scalability">
+    Scaling from 1M to 100M+ users
+  </Card>
+</CardGroup>

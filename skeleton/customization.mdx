@@ -1,0 +1,423 @@
+---
+title: Customizing the Skeleton
+description: Replace the demo application with your own frontend and backend
+---
+
+The skeleton template includes a minimal demo application to demonstrate the infrastructure. This guide shows you how to replace it with your own application while preserving the production-ready infrastructure.
+
+## Understanding the Demo Application
+
+The skeleton includes:
+
+- **Backend** (`app/backend/`): Minimal Express.js server with health check endpoints
+- **Frontend** (`app/frontend/`): React + Vite placeholder application
+- **Database**: PostgreSQL (local via Docker Compose, RDS in production)
+
+## Replacing the Backend
+
+The backend is located in `app/backend/` and uses Express.js by default.
+
+<Steps>
+
+### Review the Existing Structure
+
+The demo backend is minimal:
+
+```
+app/backend/
+  src/
+    app.js        # Express app configuration
+    server.js     # Server entry point
+  package.json    # Dependencies
+  Dockerfile      # Container build configuration
+```
+
+Key file: `app/backend/src/app.js:1`
+
+### Add Your Application Code
+
+<AccordionGroup>
+  <Accordion title="Add your routes" icon="route">
+    Create your API routes in `app/backend/src/routes/`:
+
+    ```javascript
+    // app/backend/src/routes/users.js
+    const express = require('express');
+    const router = express.Router();
+
+    router.get('/users', async (req, res) => {
+      // Your logic here
+      res.json({ users: [] });
+    });
+
+    module.exports = router;
+    ```
+
+    Import in `app.js`:
+
+    ```javascript
+    const usersRouter = require('./routes/users');
+    app.use('/api', usersRouter);
+    ```
+  </Accordion>
+
+  <Accordion title="Add business logic" icon="code">
+    Add your services in `app/backend/src/services/`:
+
+    ```javascript
+    // app/backend/src/services/user.service.js
+    class UserService {
+      async findAll() {
+        // Your business logic
+      }
+    }
+
+    module.exports = { UserService };
+    ```
+  </Accordion>
+
+  <Accordion title="Update dependencies" icon="package">
+    Update `app/backend/package.json` with your dependencies:
+
+    ```json
+    {
+      "dependencies": {
+        "express": "^4.18.2",
+        "cors": "^2.8.5",
+        "helmet": "^7.1.0",
+        "pg": "^8.11.3",
+        "your-other-dependencies": "^x.x.x"
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Preserve Required Health Check Endpoints
+
+<Warning>
+  **Critical:** Kubernetes uses these endpoints to verify service health. Do not remove them.
+</Warning>
+
+You must keep these endpoints in `app/backend/src/app.js:23`:
+
+- `GET /api/health` - Basic health check
+- `GET /api/health/database` - Database connectivity check
+- `GET /api/health/cloud` - Cloud provider credentials check
+
+```javascript
+// Required for Kubernetes liveness probe
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    provider: process.env.CLOUD_PROVIDER,
+    uptime: process.uptime(),
+  });
+});
+
+// Required for Kubernetes readiness probe
+app.get('/api/health/database', async (req, res) => {
+  // Implement actual database check
+  const db = require('./services/factory').getDatabaseService();
+  const result = await db.ping();
+  res.json(result);
+});
+
+// Cloud provider health check
+app.get('/api/health/cloud', (req, res) => {
+  res.json({
+    status: 'healthy',
+    provider: process.env.CLOUD_PROVIDER,
+    region: process.env.AWS_REGION || process.env.OCI_REGION || 'not-set',
+  });
+});
+```
+
+### Update the Dockerfile (if needed)
+
+If you're not using Node.js, replace `app/backend/Dockerfile` with your framework's build process:
+
+<CodeGroup>
+
+```dockerfile Node.js (default)
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 3000
+CMD ["node", "src/server.js"]
+```
+
+```dockerfile Python (Flask/FastAPI)
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 3000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3000"]
+```
+
+```dockerfile Go
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+COPY go.* ./
+RUN go mod download
+COPY . .
+RUN go build -o server .
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/server .
+EXPOSE 3000
+CMD ["./server"]
+```
+
+</CodeGroup>
+
+</Steps>
+
+## Replacing the Frontend
+
+The frontend is located in `app/frontend/` and uses React + Vite by default.
+
+<Steps>
+
+### Review the Existing Structure
+
+```
+app/frontend/
+  src/
+    App.jsx       # Main component (placeholder)
+    main.jsx      # Entry point
+  package.json    # Dependencies
+  Dockerfile      # Nginx-based container
+```
+
+Key file: `app/frontend/src/App.jsx:1`
+
+### Replace with Your Frontend
+
+<Tabs>
+  <Tab title="React/Vite (existing)">
+    Copy your React application code to `app/frontend/src/`:
+
+    ```bash
+    # Remove demo app
+    rm app/frontend/src/App.jsx
+
+    # Copy your source files
+    cp -r your-app/src/* app/frontend/src/
+
+    # Update dependencies
+    cp your-app/package.json app/frontend/package.json
+    ```
+  </Tab>
+
+  <Tab title="Vue.js">
+    Replace the build configuration in `app/frontend/package.json`:
+
+    ```json
+    {
+      "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview"
+      },
+      "dependencies": {
+        "vue": "^3.3.4"
+      },
+      "devDependencies": {
+        "@vitejs/plugin-vue": "^4.4.0",
+        "vite": "^5.1.4"
+      }
+    }
+    ```
+
+    Create `vite.config.js`:
+
+    ```javascript
+    import { defineConfig } from 'vite'
+    import vue from '@vitejs/plugin-vue'
+
+    export default defineConfig({
+      plugins: [vue()],
+    })
+    ```
+  </Tab>
+
+  <Tab title="Angular">
+    Update `app/frontend/package.json`:
+
+    ```json
+    {
+      "scripts": {
+        "build": "ng build --configuration production",
+        "dev": "ng serve"
+      },
+      "dependencies": {
+        "@angular/core": "^17.0.0"
+      }
+    }
+    ```
+
+    Update `app/frontend/Dockerfile`:
+
+    ```dockerfile
+    FROM node:18-alpine AS build
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm ci
+    COPY . .
+    RUN npm run build
+
+    FROM nginx:alpine
+    COPY --from=build /app/dist/your-app-name /usr/share/nginx/html
+    EXPOSE 80
+    CMD ["nginx", "-g", "daemon off;"]
+    ```
+  </Tab>
+
+  <Tab title="Next.js">
+    Update `app/frontend/package.json`:
+
+    ```json
+    {
+      "scripts": {
+        "build": "next build",
+        "start": "next start",
+        "dev": "next dev"
+      },
+      "dependencies": {
+        "next": "^14.0.0",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0"
+      }
+    }
+    ```
+
+    Update `app/frontend/Dockerfile`:
+
+    ```dockerfile
+    FROM node:18-alpine
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm ci
+    COPY . .
+    RUN npm run build
+    EXPOSE 3000
+    CMD ["npm", "start"]
+    ```
+  </Tab>
+</Tabs>
+
+### Update the Dockerfile
+
+The default Dockerfile uses a multi-stage build with Nginx:
+
+```dockerfile
+# Build stage
+FROM node:18-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Production stage
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+Adjust the `COPY --from=build` path based on your framework's output directory:
+- Vite: `/app/dist`
+- Create React App: `/app/build`
+- Angular: `/app/dist/your-app-name`
+- Vue CLI: `/app/dist`
+
+</Steps>
+
+## Testing Your Changes Locally
+
+After customizing the application, test locally with Docker Compose:
+
+```bash
+# Rebuild containers
+docker-compose build
+
+# Start services
+docker-compose up -d
+
+# Check logs
+docker-compose logs -f backend
+docker-compose logs -f frontend
+
+# Test health checks
+curl http://localhost:3000/api/health
+curl http://localhost:3000/api/health/database
+curl http://localhost:3000/api/health/cloud
+
+# Access frontend
+open http://localhost:80
+```
+
+## Updating Kubernetes Manifests
+
+After replacing the demo app, update the Kubernetes deployment manifests:
+
+<Steps>
+
+### Update Image References
+
+Search for `REEMPLAZAR` comments in `kubernetes/` manifests and update:
+
+```yaml
+# kubernetes/backend/deployment.yaml
+spec:
+  template:
+    spec:
+      containers:
+      - name: backend
+        image: your-registry/backend:v1.0  # REEMPLAZAR: your image
+```
+
+### Update Resource Limits
+
+Adjust resource requests/limits based on your application's needs:
+
+```yaml
+resources:
+  requests:
+    memory: "256Mi"  # Adjust based on your app
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+```
+
+### Update Environment Variables
+
+Add any additional environment variables your app needs:
+
+```yaml
+env:
+- name: CLOUD_PROVIDER
+  valueFrom:
+    configMapKeyRef:
+      name: govtech-config
+      key: cloud-provider
+- name: YOUR_CUSTOM_VAR
+  value: "your-value"
+```
+
+</Steps>
+
+## Next Steps
+
+- [Integrate with cloud services](/skeleton/application-integration)
+- [Deploy to production](/deployment/deployment-guide)
+- Review [multi-cloud architecture](/architecture/multi-cloud-services)

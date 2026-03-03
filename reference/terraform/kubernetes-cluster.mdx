@@ -1,0 +1,344 @@
+---
+title: Kubernetes Cluster Module
+description: EKS cluster with managed node groups and IAM roles
+---
+
+The kubernetes-cluster module creates an Amazon EKS (Elastic Kubernetes Service) cluster with managed worker nodes, IAM roles, and OIDC provider for pod-level IAM permissions.
+
+## Architecture
+
+EKS architecture components:
+
+- **Control Plane**: Managed by AWS (API server, etcd, scheduler, controller manager)
+- **Worker Nodes**: EC2 instances in private subnets running containerized workloads
+- **OIDC Provider**: Enables IAM Roles for Service Accounts (IRSA)
+- **IAM Roles**: Separate roles for cluster and worker nodes
+
+## Resources Created
+
+### EKS Cluster
+- **Resource**: `aws_eks_cluster.main`
+- Kubernetes version 1.28 (LTS)
+- Control plane managed by AWS
+- API server endpoint accessible from VPC and internet
+- CloudWatch logging enabled for all components
+
+### Managed Node Group
+- **Resource**: `aws_eks_node_group.main`
+- EC2 instances running in private subnets
+- Auto-scaling configuration
+- Rolling update strategy (max 1 node unavailable)
+- Instance type configurable (default: `t3.medium`)
+
+### IAM Roles
+
+#### Cluster Role
+- **Resource**: `aws_iam_role.eks_cluster`
+- Allows EKS service to manage AWS resources
+- Attached policy: `AmazonEKSClusterPolicy`
+- Permissions: Create load balancers, manage networking, access ECR
+
+#### Node Role
+- **Resource**: `aws_iam_role.eks_nodes`
+- Allows EC2 instances to join cluster
+- Attached policies:
+  - `AmazonEKSWorkerNodePolicy` - Node registration
+  - `AmazonEKS_CNI_Policy` - VPC networking for pods
+  - `AmazonEC2ContainerRegistryReadOnly` - Pull images from ECR
+
+### OIDC Provider
+- **Resource**: `aws_iam_openid_connect_provider.eks`
+- Enables IAM Roles for Service Accounts (IRSA)
+- Allows individual pods to assume IAM roles
+- More secure than sharing node IAM role across all pods
+
+## Variables
+
+<ParamField path="cluster_name" type="string" required>
+  Name of the EKS cluster. Should follow naming convention: `{project_name}-{environment}`
+</ParamField>
+
+<ParamField path="environment" type="string" required>
+  Deployment environment: `dev`, `staging`, or `prod`
+</ParamField>
+
+<ParamField path="region" type="string" default="us-east-1">
+  AWS region for cluster deployment
+</ParamField>
+
+<ParamField path="vpc_id" type="string" required>
+  ID of the VPC where the cluster will be created. From networking module output.
+</ParamField>
+
+<ParamField path="subnet_ids" type="list(string)" required>
+  IDs of private subnets for EKS worker nodes. Use private subnets from networking module.
+</ParamField>
+
+<ParamField path="node_instance_type" type="string" default="t3.medium">
+  EC2 instance type for worker nodes.
+  
+  - `t3.medium`: 2 vCPUs, 4GB RAM - suitable for dev/staging
+  - `t3.large`: 2 vCPUs, 8GB RAM - recommended for production
+  - `t3.xlarge`: 4 vCPUs, 16GB RAM - high-load production
+</ParamField>
+
+<ParamField path="node_min_size" type="number" default={2}>
+  Minimum number of worker nodes. At least 2 recommended for high availability.
+</ParamField>
+
+<ParamField path="node_max_size" type="number" default={6}>
+  Maximum number of worker nodes for auto-scaling during traffic spikes.
+</ParamField>
+
+<ParamField path="node_desired_size" type="number" default={2}>
+  Desired number of worker nodes at cluster startup.
+</ParamField>
+
+<ParamField path="project_name" type="string" default="govtech">
+  Project name for resource tagging and naming
+</ParamField>
+
+## Outputs
+
+<ParamField path="cluster_id" type="string">
+  Unique identifier of the EKS cluster
+</ParamField>
+
+<ParamField path="cluster_name" type="string">
+  Name of the EKS cluster
+</ParamField>
+
+<ParamField path="cluster_endpoint" type="string">
+  Kubernetes API server endpoint URL. Used for kubectl configuration.
+</ParamField>
+
+<ParamField path="cluster_ca_certificate" type="string" sensitive>
+  Base64-encoded certificate authority data for cluster authentication.
+  
+  **Sensitive**: Do not log or expose in outputs.
+</ParamField>
+
+<ParamField path="cluster_version" type="string">
+  Kubernetes version running on the cluster (e.g., "1.28")
+</ParamField>
+
+<ParamField path="node_group_arn" type="string">
+  ARN of the managed node group
+</ParamField>
+
+<ParamField path="cluster_role_arn" type="string">
+  ARN of the IAM role used by the EKS cluster
+</ParamField>
+
+<ParamField path="node_role_arn" type="string">
+  ARN of the IAM role used by worker nodes
+</ParamField>
+
+<ParamField path="oidc_provider_arn" type="string">
+  ARN of the OIDC identity provider. Required for IRSA configuration.
+</ParamField>
+
+<ParamField path="oidc_provider_url" type="string">
+  URL of the OIDC provider without `https://` prefix. Used in IAM trust policies for service accounts.
+</ParamField>
+
+## Usage Example
+
+```hcl
+module "kubernetes_cluster" {
+  source = "./modules/kubernetes-cluster"
+
+  cluster_name = "govtech-prod"
+  environment  = "prod"
+  region       = "us-east-1"
+
+  # Network configuration from networking module
+  vpc_id     = module.networking.vpc_id
+  subnet_ids = module.networking.private_subnet_ids
+
+  # Node configuration
+  node_instance_type = "t3.large"
+  node_min_size      = 3
+  node_max_size      = 10
+  node_desired_size  = 3
+
+  project_name = "govtech"
+}
+
+# Configure kubectl
+output "configure_kubectl" {
+  value = "aws eks update-kubeconfig --region ${var.region} --name ${module.kubernetes_cluster.cluster_name}"
+}
+```
+
+## Post-Deployment Configuration
+
+### Connect kubectl
+
+After cluster creation, configure kubectl to access the cluster:
+
+```bash
+aws eks update-kubeconfig --region us-east-1 --name govtech-prod
+kubectl get nodes
+```
+
+### Install Essential Add-ons
+
+#### AWS Load Balancer Controller
+
+Required for creating Application Load Balancers from Kubernetes Ingress resources:
+
+```bash
+helm repo add eks https://aws.github.io/eks-charts
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  --namespace kube-system \
+  --set clusterName=govtech-prod
+```
+
+#### EBS CSI Driver
+
+For persistent volume support:
+
+```bash
+helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+helm install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver \
+  --namespace kube-system
+```
+
+## IAM Roles for Service Accounts (IRSA)
+
+The OIDC provider enables pods to assume IAM roles without embedding credentials.
+
+### Example: S3 Access for Backend Pods
+
+```hcl
+resource "aws_iam_role" "backend_s3_access" {
+  name = "backend-s3-access"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = module.kubernetes_cluster.oidc_provider_arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${module.kubernetes_cluster.oidc_provider_url}:sub" = "system:serviceaccount:default:backend"
+          "${module.kubernetes_cluster.oidc_provider_url}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+}
+```
+
+Annotate Kubernetes ServiceAccount:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend
+  namespace: default
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/backend-s3-access
+```
+
+## Monitoring and Logging
+
+### CloudWatch Logs
+
+Cluster control plane logs are automatically sent to CloudWatch:
+
+- API server logs
+- Audit logs
+- Authenticator logs
+- Controller manager logs
+- Scheduler logs
+
+Access logs in CloudWatch Logs console under `/aws/eks/{cluster-name}/cluster`.
+
+### Node Metrics
+
+Worker node metrics (CPU, memory, disk) are available in CloudWatch Container Insights.
+
+## Scaling
+
+### Manual Scaling
+
+Update node group size:
+
+```bash
+aws eks update-nodegroup-config \
+  --cluster-name govtech-prod \
+  --nodegroup-name govtech-nodes-prod \
+  --scaling-config minSize=3,maxSize=12,desiredSize=5
+```
+
+### Cluster Autoscaler
+
+Install Cluster Autoscaler for automatic node scaling based on pod demand:
+
+```bash
+helm repo add autoscaler https://kubernetes.github.io/autoscaler
+helm install cluster-autoscaler autoscaler/cluster-autoscaler \
+  --namespace kube-system \
+  --set autoDiscovery.clusterName=govtech-prod
+```
+
+## Security Best Practices
+
+### Private Endpoint Access
+
+For production, restrict API server access to VPC only:
+
+```hcl
+vpc_config {
+  endpoint_private_access = true
+  endpoint_public_access  = false  # Disable public access
+  subnet_ids              = var.subnet_ids
+}
+```
+
+### RBAC Configuration
+
+Implement least-privilege RBAC policies for service accounts and users.
+
+### Network Policies
+
+Use Kubernetes Network Policies to control pod-to-pod communication:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+```
+
+## Cost Optimization
+
+### Development Environments
+
+For dev/staging, use smaller instance types and fewer nodes:
+
+```hcl
+node_instance_type = "t3.small"   # 2 vCPUs, 2GB RAM
+node_min_size      = 1
+node_max_size      = 3
+node_desired_size  = 1
+```
+
+### Spot Instances
+
+Consider using Spot instances for non-critical workloads (requires separate node group configuration).

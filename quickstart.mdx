@@ -1,80 +1,466 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start"
+description: "Get the GovTech Multicloud Platform running in minutes"
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+Before you begin, ensure you have the following installed:
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+- Node.js 20+
+- Docker and Docker Compose
+- Git
+- PostgreSQL (local or cloud)
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  For production deployments, you'll also need AWS CLI configured with appropriate credentials, kubectl, and Terraform installed.
 </Note>
+
+## Installation
+
+<Steps>
+  <Step title="Clone the Repository">
+    Clone the GovTech Multicloud Platform repository:
+
+    ```bash
+    git clone https://github.com/alexander-fq/multicloud.git
+    cd multicloud/platform
+    ```
+
+    The repository contains two main directories:
+    - `platform/` - Complete demo with running application
+    - `skeleton/` - Template for new projects
+  </Step>
+
+  <Step title="Start with Docker Compose">
+    The fastest way to get started is using Docker Compose:
+
+    ```bash
+    docker-compose up -d
+    ```
+
+    This will start:
+    - **PostgreSQL** on port `5432`
+    - **Backend API** on port `3000`
+    - **Frontend** on port `80`
+
+    <Accordion title="What's happening behind the scenes?">
+      Docker Compose launches three containers:
+
+      1. **postgres** - PostgreSQL 15 Alpine with health checks
+      2. **backend** - Node.js Express API with hot reload
+      3. **frontend** - React SPA served by Nginx with API proxy
+
+      All containers are connected via the `govtech-network` bridge network.
+    </Accordion>
+  </Step>
+
+  <Step title="Verify the Installation">
+    Check that all services are healthy:
+
+    ```bash
+    # Check container status
+    docker-compose ps
+
+    # Test backend health
+    curl http://localhost:3000/api/health
+
+    # Test database health
+    curl http://localhost:3000/api/health/database
+
+    # Test cloud credentials
+    curl http://localhost:3000/api/health/cloud
+    ```
+
+    Expected response from `/api/health`:
+
+    ```json
+    {
+      "status": "healthy",
+      "timestamp": "2026-03-03T18:30:00.000Z",
+      "provider": "aws",
+      "uptime": 45.2,
+      "checks": {
+        "database": {
+          "status": "healthy",
+          "stats": { "total": 10, "idle": 4, "waiting": 0 }
+        },
+        "cloudCredentials": { "status": "healthy" }
+      },
+      "responseTime": "5ms"
+    }
+    ```
+  </Step>
+
+  <Step title="Access the Platform">
+    Open your browser and navigate to:
+
+    - **Frontend**: [http://localhost](http://localhost)
+    - **Backend API**: [http://localhost:3000](http://localhost:3000)
+    - **API Docs**: [http://localhost:3000/api/health](http://localhost:3000/api/health)
+
+    <Check>
+      You should see the GovTech platform homepage with current provider information and key statistics.
+    </Check>
+  </Step>
+</Steps>
+
+## Manual Setup (Without Docker)
+
+If you prefer to run services individually:
+
+<Steps>
+  <Step title="Setup PostgreSQL">
+    Install and start PostgreSQL:
+
+    ```bash
+    # On Ubuntu/Debian
+    sudo apt-get install postgresql-15
+    sudo systemctl start postgresql
+
+    # Create database
+    sudo -u postgres createdb govtech_dev
+    ```
+  </Step>
+
+  <Step title="Configure Backend">
+    Navigate to the backend directory and install dependencies:
+
+    ```bash
+    cd platform/app/backend
+    npm install
+    ```
+
+    Create `.env` file from the example:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    Edit `.env` with your configuration:
+
+    ```bash .env
+    # General
+    NODE_ENV=development
+    PORT=3000
+    HOST=0.0.0.0
+
+    # Cloud Provider Selection
+    CLOUD_PROVIDER=aws
+
+    # AWS Configuration
+    AWS_REGION=us-east-1
+    AWS_ACCESS_KEY_ID=your-access-key-id
+    AWS_SECRET_ACCESS_KEY=your-secret-access-key
+    AWS_BUCKET=govtech-documents
+    AWS_LOG_GROUP=/aws/govtech/api
+
+    # Database
+    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/govtech_dev
+
+    # Security
+    JWT_SECRET=your-jwt-secret-key-change-this-in-production
+    API_RATE_LIMIT=100
+    ```
+
+    <Warning>
+      Never commit `.env` files to version control. The `.env.example` file is provided as a template.
+    </Warning>
+  </Step>
+
+  <Step title="Start Backend">
+    ```bash
+    npm start
+    ```
+
+    For development with auto-reload:
+
+    ```bash
+    npm run dev
+    ```
+
+    The backend will be available at `http://localhost:3000`
+  </Step>
+
+  <Step title="Setup Frontend">
+    In a new terminal, navigate to the frontend directory:
+
+    ```bash
+    cd platform/app/frontend
+    npm install
+    npm run dev
+    ```
+
+    The frontend will be available at `http://localhost:5173`
+  </Step>
+</Steps>
+
+## Environment Variables
+
+<AccordionGroup>
+  <Accordion title="General Configuration">
+    | Variable | Default | Description |
+    |----------|---------|-------------|
+    | `NODE_ENV` | development | Environment mode |
+    | `PORT` | 3000 | Backend server port |
+    | `HOST` | 0.0.0.0 | Server bind address |
+  </Accordion>
+
+  <Accordion title="Cloud Provider">
+    | Variable | Options | Description |
+    |----------|---------|-------------|
+    | `CLOUD_PROVIDER` | aws, oci, gcp, azure | Active cloud provider |
+  </Accordion>
+
+  <Accordion title="AWS Configuration">
+    | Variable | Example | Description |
+    |----------|---------|-------------|
+    | `AWS_REGION` | us-east-1 | AWS region |
+    | `AWS_ACCESS_KEY_ID` | AKIA... | AWS access key |
+    | `AWS_SECRET_ACCESS_KEY` | secret... | AWS secret key |
+    | `AWS_BUCKET` | govtech-documents | S3 bucket name |
+    | `AWS_LOG_GROUP` | /aws/govtech/api | CloudWatch log group |
+  </Accordion>
+
+  <Accordion title="Database">
+    | Variable | Example | Description |
+    |----------|---------|-------------|
+    | `DATABASE_URL` | postgresql://user:pass@host:5432/db | PostgreSQL connection string |
+  </Accordion>
+
+  <Accordion title="Security">
+    | Variable | Default | Description |
+    |----------|---------|-------------|
+    | `JWT_SECRET` | - | JWT signing key (min 32 chars) |
+    | `API_RATE_LIMIT` | 100 | Requests per 15 minutes |
+  </Accordion>
+</AccordionGroup>
+
+## Available Scripts
+
+### Backend Commands
+
+<CodeGroup>
+```bash Production
+cd app/backend
+npm start
+```
+
+```bash Development
+cd app/backend
+npm run dev  # With nodemon auto-reload
+```
+
+```bash Testing
+cd app/backend
+npm test  # Run tests with coverage
+```
+
+```bash Linting
+cd app/backend
+npm run lint      # Check code quality
+npm run lint:fix  # Auto-fix issues
+```
+</CodeGroup>
+
+### Frontend Commands
+
+<CodeGroup>
+```bash Development
+cd app/frontend
+npm run dev  # Port 5173
+```
+
+```bash Production Build
+cd app/frontend
+npm run build    # Build for production
+npm run preview  # Preview production build
+```
+
+```bash Linting
+cd app/frontend
+npm run lint
+```
+</CodeGroup>
+
+### Docker Commands
+
+<CodeGroup>
+```bash Start All Services
+docker-compose up -d
+```
+
+```bash View Logs
+docker-compose logs -f backend
+docker-compose logs -f frontend
+docker-compose logs -f postgres
+```
+
+```bash Stop Services
+docker-compose down
+```
+
+```bash Rebuild Images
+docker-compose build --no-cache
+docker-compose up -d
+```
+</CodeGroup>
+
+## Testing the API
+
+<Tabs>
+  <Tab title="Health Endpoints">
+    ```bash
+    # Overall health
+    curl http://localhost:3000/api/health
+
+    # Database health
+    curl http://localhost:3000/api/health/database
+
+    # Cloud credentials
+    curl http://localhost:3000/api/health/cloud
+    ```
+  </Tab>
+
+  <Tab title="Platform Info">
+    ```bash
+    # Basic platform info
+    curl http://localhost:3000/
+
+    # Detailed info
+    curl http://localhost:3000/api/info
+
+    # Current provider
+    curl http://localhost:3000/api/info/provider
+
+    # Architecture patterns
+    curl http://localhost:3000/api/info/architecture
+    ```
+  </Tab>
+
+  <Tab title="Migration Tools">
+    ```bash
+    # Scan current infrastructure
+    curl -X POST http://localhost:3000/api/migration/scan
+
+    # Create migration plan
+    curl -X POST http://localhost:3000/api/migration/plan \
+      -H "Content-Type: application/json" \
+      -d '{"from":"aws","to":"oci"}'
+
+    # List supported providers
+    curl http://localhost:3000/api/migration/providers
+    ```
+  </Tab>
+</Tabs>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server won't start">
+    **Symptoms**: Backend fails to start or exits immediately
+
+    **Solutions**:
+    1. Check if port 3000 is already in use:
+       ```bash
+       lsof -i :3000
+       ```
+    2. Verify DATABASE_URL is correct in `.env`
+    3. Ensure PostgreSQL is running:
+       ```bash
+       docker-compose ps postgres
+       ```
+    4. Check backend logs:
+       ```bash
+       docker-compose logs backend
+       ```
+  </Accordion>
+
+  <Accordion title="Database connection failed">
+    **Symptoms**: "ECONNREFUSED" or "Connection timeout" errors
+
+    **Solutions**:
+    1. Verify PostgreSQL is running:
+       ```bash
+       docker-compose ps postgres
+       ```
+    2. Check connection string format in `.env`:
+       ```
+       DATABASE_URL=postgresql://username:password@hostname:5432/database_name
+       ```
+    3. Test connection manually:
+       ```bash
+       psql postgresql://postgres:postgres@localhost:5432/govtech_dev
+       ```
+    4. Wait for PostgreSQL to be fully ready (check health):
+       ```bash
+       docker-compose exec postgres pg_isready -U postgres
+       ```
+  </Accordion>
+
+  <Accordion title="AWS credentials invalid">
+    **Symptoms**: Cloud health check fails or AWS operations error
+
+    **Solutions**:
+    1. Verify credentials in `.env` are correct
+    2. Test AWS CLI access:
+       ```bash
+       aws sts get-caller-identity
+       ```
+    3. For local development, you can use placeholder credentials (demo mode)
+    4. Ensure IAM user has necessary permissions (S3, CloudWatch, RDS)
+  </Accordion>
+
+  <Accordion title="Docker build fails">
+    **Symptoms**: Image build errors or dependency installation fails
+
+    **Solutions**:
+    1. Clear Docker cache:
+       ```bash
+       docker-compose build --no-cache
+       ```
+    2. Remove old images:
+       ```bash
+       docker system prune -a
+       ```
+    3. Check Dockerfile syntax in `app/backend/Dockerfile`
+    4. Ensure package.json has valid dependencies
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Platform Overview"
+    icon="map"
+    href="/platform-overview"
+  >
+    Learn about the architecture and multi-cloud design patterns
+  </Card>
+  <Card
+    title="Deploy to Kubernetes"
+    icon="cubes"
+    href="/deployment/kubernetes"
+  >
+    Deploy to EKS, GKE, or AKS with Terraform
+  </Card>
+  <Card
+    title="API Reference"
+    icon="code"
+    href="/api-reference"
+  >
+    Explore all available endpoints
+  </Card>
+  <Card
+    title="Migration Guide"
+    icon="arrows-rotate"
+    href="/migration/overview"
+  >
+    Learn how to migrate between cloud providers
+  </Card>
+</CardGroup>
+
+<Check>
+  You now have the GovTech Multicloud Platform running locally! Explore the platform features and check out the platform overview to understand the architecture.
+</Check>

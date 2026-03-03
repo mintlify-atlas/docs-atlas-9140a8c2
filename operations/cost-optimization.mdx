@@ -1,0 +1,490 @@
+---
+title: Cost Optimization
+description: Cost monitoring, anomaly detection, and optimization strategies for the GovTech platform
+---
+
+## Overview
+
+The GovTech platform uses AWS Cost Explorer, Cost Anomaly Detection, and infrastructure best practices to maintain cost efficiency while meeting performance and compliance requirements.
+
+## Cost Monitoring
+
+### AWS Cost Anomaly Detection
+
+Automated anomaly detection alerts on unusual spending patterns:
+
+```hcl terraform/modules/security/aws.tf
+resource "aws_ce_anomaly_monitor" "govtech" {
+  name              = "govtech-cost-monitor-prod"
+  monitor_type      = "DIMENSIONAL"
+  monitor_dimension = "SERVICE"
+}
+
+resource "aws_ce_anomaly_subscription" "govtech_alert" {
+  name      = "govtech-cost-alert-prod"
+  frequency = "DAILY"
+  
+  monitor_arn_list = [aws_ce_anomaly_monitor.govtech.arn]
+  
+  # Alert only if anomalous spend exceeds $50
+  threshold_expression {
+    dimension {
+      key           = "ANOMALY_TOTAL_IMPACT_ABSOLUTE"
+      values        = ["50"]
+      match_options = ["GREATER_THAN_OR_EQUAL"]
+    }
+  }
+  
+  subscriber {
+    type    = "EMAIL"
+    address = "devops@govtech.example.com"
+  }
+}
+```
+
+<Info>
+Cost Anomaly Detection uses machine learning to establish baseline spending patterns and alerts when actual costs deviate significantly.
+</Info>
+
+### What Triggers Alerts
+
+<AccordionGroup>
+  <Accordion title="Unusual Service Costs">
+    Examples:
+    - EKS costs increase from $200/month to $600/month
+    - S3 data transfer jumps from 100GB to 2TB
+    - RDS costs spike due to increased IOPS
+    
+    **Action**: Investigate service-specific usage in Cost Explorer
+  </Accordion>
+
+  <Accordion title="New Service Usage">
+    Detection of previously unused services:
+    - Someone launches EC2 instances (not part of architecture)
+    - NAT Gateway data transfer increases significantly
+    - New AWS service activated
+    
+    **Action**: Review CloudTrail to identify who/what initiated the change
+  </Accordion>
+
+  <Accordion title="Regional Anomalies">
+    Unexpected costs in non-primary regions:
+    - Resources created in wrong region
+    - Cross-region data transfer
+    
+    **Action**: Use CloudTrail to find resource creation events
+  </Accordion>
+</AccordionGroup>
+
+## Cost Breakdown by Environment
+
+### Development Environment
+
+| Service | Resource | Monthly Cost | Annual |
+|---------|----------|--------------|--------|
+| EKS | Control plane | $73 | $876 |
+| EC2 | 2x t3.medium nodes | $60 | $720 |
+| RDS | db.t3.micro | $15 | $180 |
+| ALB | Application Load Balancer | $18 | $216 |
+| NAT Gateway | 1 NAT GW | $32 | $384 |
+| S3 | Storage + requests | $5 | $60 |
+| **Total** | | **~$180/month** | **~$2,160/year** |
+
+### Production Environment
+
+| Service | Resource | Monthly Cost | Annual |
+|---------|----------|--------------|--------|
+| EKS | Control plane | $73 | $876 |
+| EC2 | 3-10x t3.medium nodes (avg 5) | $150 | $1,800 |
+| RDS | db.t3.small Multi-AZ | $75 | $900 |
+| ALB | Application Load Balancer | $25 | $300 |
+| NAT Gateway | 3 NAT GW (Multi-AZ) | $96 | $1,152 |
+| S3 | Storage + backups | $20 | $240 |
+| CloudWatch | Logs + metrics | $15 | $180 |
+| Secrets Manager | Secrets storage | $5 | $60 |
+| **Total** | | **~$335/month** | **~$4,020/year** |
+
+<Info>
+Actual costs vary based on:
+- Traffic volume (ALB processing, NAT Gateway data transfer)
+- Auto-scaling (EKS node count)
+- Storage growth (RDS, S3)
+- Data transfer out to internet
+</Info>
+
+## Cost Optimization Strategies
+
+### 1. Right-Sizing EC2 Instances
+
+<Steps>
+  <Step title="Monitor Utilization">
+    Check actual CPU and memory usage:
+    
+    ```bash
+    # Get node utilization over last 7 days
+    aws cloudwatch get-metric-statistics \
+      --namespace AWS/EC2 \
+      --metric-name CPUUtilization \
+      --dimensions Name=InstanceId,Value=i-xxxxx \
+      --start-time $(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%S) \
+      --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+      --period 86400 \
+      --statistics Average,Maximum
+    ```
+  </Step>
+
+  <Step title="Analyze Recommendations">
+    Use AWS Compute Optimizer:
+    
+    ```bash
+    aws compute-optimizer get-ec2-instance-recommendations \
+      --query 'instanceRecommendations[*].{Instance:instanceArn,Current:currentInstanceType,Recommended:recommendationOptions[0].instanceType}'
+    ```
+  </Step>
+
+  <Step title="Adjust Node Group">
+    Update EKS node group instance type:
+    
+    ```hcl terraform/modules/kubernetes-cluster/aws.tf
+    resource "aws_eks_node_group" "main" {
+      instance_types = ["t3.small"]  # Downsize if utilization < 40%
+      
+      scaling_config {
+        min_size     = 2
+        max_size     = 8
+        desired_size = 3
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+### 2. Optimize RDS Instances
+
+<CardGroup cols={2}>
+  <Card title="Use Multi-AZ Only in Production" icon="database">
+    Multi-AZ doubles RDS costs. Only enable for production:
+    
+    ```hcl
+    multi_az = var.environment == "prod" ? true : false
+    ```
+    
+    **Savings**: ~50% for dev/staging
+  </Card>
+
+  <Card title="Enable Storage Autoscaling" icon="chart-line">
+    Start small, grow as needed:
+    
+    ```hcl
+    allocated_storage     = 20
+    max_allocated_storage = 100
+    ```
+    
+    **Savings**: Pay only for used storage
+  </Card>
+</CardGroup>
+
+### 3. S3 Cost Optimization
+
+<AccordionGroup>
+  <Accordion title="Lifecycle Policies">
+    Automatically transition objects to cheaper storage classes:
+    
+    ```hcl terraform/modules/storage/aws.tf
+    lifecycle_rule {
+      enabled = true
+      
+      transition {
+        days          = 30
+        storage_class = "STANDARD_IA"  # 50% cheaper
+      }
+      
+      transition {
+        days          = 90
+        storage_class = "GLACIER_IR"   # 80% cheaper
+      }
+      
+      expiration {
+        days = 365  # Delete after 1 year
+      }
+    }
+    ```
+    
+    **Savings**: 50-80% on older backups
+  </Accordion>
+
+  <Accordion title="Intelligent Tiering">
+    For unpredictable access patterns:
+    
+    ```hcl
+    resource "aws_s3_bucket_intelligent_tiering_configuration" "backups" {
+      bucket = aws_s3_bucket.storage.id
+      name   = "backups-tiering"
+      
+      tiering {
+        access_tier = "ARCHIVE_ACCESS"
+        days        = 90
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Delete Incomplete Multipart Uploads">
+    Clean up abandoned uploads:
+    
+    ```hcl
+    lifecycle_rule {
+      enabled = true
+      
+      abort_incomplete_multipart_upload {
+        days_after_initiation = 7
+      }
+    }
+    ```
+    
+    **Savings**: Small but eliminates waste
+  </Accordion>
+</AccordionGroup>
+
+### 4. NAT Gateway Optimization
+
+<Warning>
+NAT Gateways are expensive: **$32/month per gateway + data transfer costs**
+</Warning>
+
+**Options**:
+
+<Tabs>
+  <Tab title="Current (Multi-AZ)">
+    **Production**: 3 NAT Gateways (one per AZ)
+    
+    - High availability
+    - No cross-AZ data transfer costs
+    - **Cost**: $96/month + data transfer
+  </Tab>
+  
+  <Tab title="Single NAT Gateway">
+    **Development**: 1 NAT Gateway
+    
+    - Lower cost
+    - Acceptable for non-critical environments
+    - **Cost**: $32/month + data transfer
+    - **Savings**: $64/month for dev
+  </Tab>
+  
+  <Tab title="VPC Endpoints">
+    **For AWS Services**: Use VPC endpoints instead of NAT
+    
+    ```hcl
+    resource "aws_vpc_endpoint" "s3" {
+      vpc_id       = aws_vpc.main.id
+      service_name = "com.amazonaws.us-east-1.s3"
+    }
+    ```
+    
+    - Free for S3 and DynamoDB
+    - $0.01/GB for others (cheaper than NAT)
+    - **Savings**: Reduce NAT Gateway data transfer
+  </Tab>
+</Tabs>
+
+### 5. EKS Cost Optimization
+
+<Steps>
+  <Step title="Enable Cluster Autoscaler">
+    Scale nodes based on actual pod resource requests:
+    
+    ```bash
+    # Install cluster autoscaler
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/autoscaler/master/cluster-autoscaler/cloudprovider/aws/examples/cluster-autoscaler-autodiscover.yaml
+    ```
+    
+    **Savings**: Only run nodes when needed (especially off-hours)
+  </Step>
+
+  <Step title="Use Spot Instances for Non-Critical Workloads">
+    ```hcl
+    resource "aws_eks_node_group" "spot" {
+      capacity_type  = "SPOT"
+      instance_types = ["t3.medium", "t3a.medium"]
+      
+      # Mix with on-demand for stability
+      scaling_config {
+        min_size     = 0
+        max_size     = 5
+        desired_size = 2
+      }
+    }
+    ```
+    
+    **Savings**: 60-90% discount on EC2 costs
+  </Step>
+
+  <Step title="Set Pod Resource Requests Accurately">
+    Prevent over-provisioning:
+    
+    ```yaml
+    resources:
+      requests:
+        memory: "256Mi"  # Actual usage, not arbitrary
+        cpu: "100m"
+      limits:
+        memory: "512Mi"  # 2x requests for burst
+        cpu: "500m"
+    ```
+  </Step>
+</Steps>
+
+### 6. Reserved Instances and Savings Plans
+
+For stable production workloads, commit to 1 or 3 years:
+
+| Commitment | Discount | Best For |
+|------------|----------|----------|
+| 1-year No Upfront | 20-40% | Predictable baseline |
+| 1-year All Upfront | 30-50% | Known requirements |
+| 3-year All Upfront | 40-60% | Long-term stable workloads |
+
+**Recommended Strategy**:
+- Reserve capacity for minimum baseline (e.g., 2 nodes always running)
+- Use on-demand/spot for auto-scaling
+
+```bash
+# Analyze recommendations
+aws ce get-reservation-purchase-recommendation \
+  --service "Amazon Elastic Compute Cloud - Compute" \
+  --lookback-period-in-days SIXTY_DAYS
+```
+
+## Cost Monitoring Tools
+
+### AWS Cost Explorer
+
+**Access**: AWS Console > Cost Management > Cost Explorer
+
+**Key Reports**:
+1. **Monthly costs by service**: Identify largest cost drivers
+2. **Cost by tag**: Track costs per environment (`Environment: prod/dev`)
+3. **Daily spend trend**: Detect sudden increases
+4. **Reserved Instance utilization**: Ensure RIs are being used
+
+### Cost Allocation Tags
+
+Ensure all resources are tagged:
+
+```hcl Common tags
+tags = {
+  Environment = var.environment  # prod, staging, dev
+  Project     = "govtech"
+  ManagedBy   = "terraform"
+  CostCenter  = "engineering"
+  Owner       = "devops-team"
+}
+```
+
+### Budgets and Alerts
+
+Set up AWS Budgets for proactive monitoring:
+
+```bash
+# Create monthly budget with alerts
+aws budgets create-budget \
+  --account-id 835960996869 \
+  --budget file://budget.json \
+  --notifications-with-subscribers file://notifications.json
+```
+
+<CodeGroup>
+```json budget.json
+{
+  "BudgetName": "GovTech-Prod-Monthly",
+  "BudgetLimit": {
+    "Amount": "400",
+    "Unit": "USD"
+  },
+  "TimeUnit": "MONTHLY",
+  "BudgetType": "COST",
+  "CostFilters": {
+    "TagKeyValue": ["user:Project$govtech", "user:Environment$prod"]
+  }
+}
+```
+
+```json notifications.json
+[
+  {
+    "Notification": {
+      "NotificationType": "ACTUAL",
+      "ComparisonOperator": "GREATER_THAN",
+      "Threshold": 80,
+      "ThresholdType": "PERCENTAGE"
+    },
+    "Subscribers": [
+      {
+        "SubscriptionType": "EMAIL",
+        "Address": "devops@govtech.example.com"
+      }
+    ]
+  }
+]
+```
+</CodeGroup>
+
+## Quick Wins Checklist
+
+- [ ] Enable S3 lifecycle policies for backups (50% savings)
+- [ ] Use single NAT Gateway in dev environment ($64/month savings)
+- [ ] Disable Multi-AZ RDS in dev/staging (50% RDS savings)
+- [ ] Delete unattached EBS volumes and old snapshots
+- [ ] Enable Cost Anomaly Detection alerts
+- [ ] Set up AWS Budgets for each environment
+- [ ] Review and delete unused Elastic IPs ($3.60/month each)
+- [ ] Enable EKS cluster autoscaler
+- [ ] Use Spot instances for dev/staging workloads
+- [ ] Create VPC endpoints for S3 and ECR
+
+## Cost Optimization Review Schedule
+
+| Activity | Frequency | Owner |
+|----------|-----------|-------|
+| Review Cost Explorer | Weekly | DevOps |
+| Analyze anomaly alerts | As triggered | DevOps |
+| Right-sizing analysis | Monthly | Infrastructure |
+| Reserved Instance review | Quarterly | Finance + DevOps |
+| Budget vs actual review | Monthly | Project Lead |
+| Tag compliance audit | Monthly | DevOps |
+
+## Useful Cost Queries
+
+```bash
+# Get current month spend
+aws ce get-cost-and-usage \
+  --time-period Start=$(date +%Y-%m-01),End=$(date +%Y-%m-%d) \
+  --granularity MONTHLY \
+  --metrics BlendedCost \
+  --group-by Type=DIMENSION,Key=SERVICE
+
+# Get costs by environment tag
+aws ce get-cost-and-usage \
+  --time-period Start=$(date -d '30 days ago' +%Y-%m-%d),End=$(date +%Y-%m-%d) \
+  --granularity MONTHLY \
+  --metrics BlendedCost \
+  --group-by Type=TAG,Key=Environment
+
+# Forecast next month
+aws ce get-cost-forecast \
+  --time-period Start=$(date +%Y-%m-01),End=$(date -d 'next month' +%Y-%m-01) \
+  --metric BLENDED_COST \
+  --granularity MONTHLY
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Resource utilization dashboards and metrics
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture/overview">
+    Infrastructure architecture and design decisions
+  </Card>
+</CardGroup>

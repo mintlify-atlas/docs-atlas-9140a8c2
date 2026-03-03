@@ -1,0 +1,268 @@
+---
+title: 'Deployment Setup Guide'
+description: 'Initial setup and prerequisites for deploying the GovTech Multicloud Platform'
+---
+
+## Overview
+
+This guide walks you through the initial setup and prerequisites needed to deploy the GovTech Multicloud Platform to AWS using Terraform and Kubernetes (EKS).
+
+## Prerequisites
+
+### Required Tools
+
+Ensure the following tools are installed and configured:
+
+<Steps>
+  <Step title="Install AWS CLI">
+    Download and install the AWS CLI:
+    ```bash
+    # macOS
+    brew install awscli
+    
+    # Linux
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    unzip awscliv2.zip
+    sudo ./aws/install
+    ```
+    
+    Verify installation:
+    ```bash
+    aws --version
+    ```
+  </Step>
+
+  <Step title="Install Terraform">
+    Install Terraform version 1.5.0 or higher:
+    ```bash
+    # macOS
+    brew install terraform
+    
+    # Linux
+    wget https://releases.hashicorp.com/terraform/1.5.0/terraform_1.5.0_linux_amd64.zip
+    unzip terraform_1.5.0_linux_amd64.zip
+    sudo mv terraform /usr/local/bin/
+    ```
+    
+    Verify installation:
+    ```bash
+    terraform version
+    # Should show: Terraform v1.5.0 or higher
+    ```
+  </Step>
+
+  <Step title="Install kubectl">
+    Install kubectl for Kubernetes cluster management:
+    ```bash
+    # macOS
+    brew install kubectl
+    
+    # Linux
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    chmod +x kubectl
+    sudo mv kubectl /usr/local/bin/
+    ```
+    
+    Verify installation:
+    ```bash
+    kubectl version --client
+    ```
+  </Step>
+</Steps>
+
+### AWS Account Setup
+
+<Steps>
+  <Step title="Configure AWS Credentials">
+    Configure your AWS credentials with appropriate permissions:
+    ```bash
+    aws configure
+    ```
+    
+    Enter your AWS credentials:
+    - AWS Access Key ID
+    - AWS Secret Access Key
+    - Default region: `us-east-1`
+    - Default output format: `json`
+  </Step>
+
+  <Step title="Verify AWS Access">
+    Verify your AWS account access:
+    ```bash
+    aws sts get-caller-identity
+    ```
+    
+    This should return your account ID, user ARN, and user ID.
+  </Step>
+
+  <Step title="Create S3 Bucket for Terraform State">
+    Create an S3 bucket to store Terraform state (replace account ID):
+    ```bash
+    aws s3 mb s3://govtech-terraform-state-<YOUR_ACCOUNT_ID> --region us-east-1
+    
+    # Enable versioning
+    aws s3api put-bucket-versioning \
+      --bucket govtech-terraform-state-<YOUR_ACCOUNT_ID> \
+      --versioning-configuration Status=Enabled
+    
+    # Enable encryption
+    aws s3api put-bucket-encryption \
+      --bucket govtech-terraform-state-<YOUR_ACCOUNT_ID> \
+      --server-side-encryption-configuration '{
+        "Rules": [{
+          "ApplyServerSideEncryptionByDefault": {
+            "SSEAlgorithm": "AES256"
+          }
+        }]
+      }'
+    ```
+  </Step>
+</Steps>
+
+## IAM Permissions
+
+Your AWS user or role needs the following permissions:
+
+- **VPC**: Create and manage VPCs, subnets, route tables, internet gateways, NAT gateways
+- **EKS**: Create and manage EKS clusters and node groups
+- **EC2**: Create and manage EC2 instances, security groups, key pairs
+- **RDS**: Create and manage RDS instances, subnet groups, parameter groups
+- **S3**: Create and manage S3 buckets
+- **IAM**: Create and manage IAM roles, policies, OIDC providers
+- **KMS**: Create and manage KMS keys
+- **ECR**: Create and manage ECR repositories
+- **CloudTrail**: Create and manage CloudTrail trails
+- **GuardDuty**: Enable and manage GuardDuty
+- **WAF**: Create and manage WAF web ACLs
+
+<Warning>
+  For production deployments, use IAM roles with least privilege access. Avoid using root account credentials.
+</Warning>
+
+## Environment Variables
+
+Set up required environment variables:
+
+```bash
+# AWS Configuration
+export AWS_REGION=us-east-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Database Password (use a secure password manager)
+export TF_VAR_db_password="your-secure-password-here"
+
+# Add to your ~/.bashrc or ~/.zshrc for persistence
+echo 'export AWS_REGION=us-east-1' >> ~/.bashrc
+```
+
+<Note>
+  Never commit the `db_password` to version control. Use environment variables, AWS Secrets Manager, or a secure secret management solution.
+</Note>
+
+## Project Structure
+
+Understand the project structure before deployment:
+
+```
+platform/
+├── terraform/
+│   ├── main.tf                    # Main Terraform configuration
+│   ├── variables.tf               # Variable definitions
+│   ├── modules/
+│   │   ├── networking/            # VPC, subnets, gateways
+│   │   ├── kubernetes-cluster/    # EKS cluster and node groups
+│   │   ├── database/              # RDS PostgreSQL
+│   │   ├── storage/               # S3 buckets
+│   │   └── security/              # WAF, KMS, GuardDuty, CloudTrail
+│   └── environments/
+│       ├── dev/                   # Dev environment config
+│       ├── staging/               # Staging environment config
+│       └── prod/                  # Production environment config
+└── kubernetes/
+    ├── deploy.sh                  # Deployment script
+    ├── namespace.yaml             # Namespace with security policies
+    ├── configmap.yaml             # Application configuration
+    ├── backend/                   # Backend deployment manifests
+    ├── frontend/                  # Frontend deployment manifests
+    ├── database/                  # PostgreSQL StatefulSet
+    └── ingress/                   # AWS ALB Ingress
+```
+
+## Pre-Deployment Checklist
+
+Before deploying, verify:
+
+<AccordionGroup>
+  <Accordion title="Tools Installed">
+    - [ ] AWS CLI installed and configured
+    - [ ] Terraform >= 1.5.0 installed
+    - [ ] kubectl installed
+    - [ ] Git installed
+  </Accordion>
+
+  <Accordion title="AWS Access">
+    - [ ] AWS credentials configured
+    - [ ] Correct AWS region selected (us-east-1)
+    - [ ] IAM permissions verified
+    - [ ] S3 bucket for Terraform state created
+  </Accordion>
+
+  <Accordion title="Environment Configuration">
+    - [ ] Environment variables set
+    - [ ] Database password generated (secure)
+    - [ ] Environment selected (dev/staging/prod)
+  </Accordion>
+
+  <Accordion title="Network Requirements">
+    - [ ] No CIDR conflicts with existing VPCs
+    - [ ] Sufficient IP addresses in chosen CIDR ranges
+    - [ ] DNS resolution working
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+Once prerequisites are complete, proceed to:
+
+1. [Terraform Configuration](/deployment/terraform-configuration) - Set up infrastructure
+2. [Kubernetes Deployment](/deployment/kubernetes-deployment) - Deploy applications
+3. [Environments](/deployment/environments) - Understand environment differences
+
+## Troubleshooting
+
+### AWS CLI Not Found
+
+If you see `aws: command not found`:
+```bash
+# Add AWS CLI to PATH
+export PATH=$PATH:/usr/local/bin
+```
+
+### Terraform Version Mismatch
+
+If Terraform version is too old:
+```bash
+# Check current version
+terraform version
+
+# Upgrade to latest
+brew upgrade terraform  # macOS
+```
+
+### kubectl Connection Issues
+
+If kubectl cannot connect to cluster:
+```bash
+# Update kubeconfig
+aws eks update-kubeconfig --name govtech-dev --region us-east-1
+
+# Verify connection
+kubectl cluster-info
+```
+
+## Support
+
+For additional help:
+- Check the [Terraform documentation](/deployment/terraform-configuration)
+- Review [environment-specific configurations](/deployment/environments)
+- Consult [rollback procedures](/deployment/rollback-procedures) if issues occur

@@ -1,0 +1,374 @@
+---
+title: Disaster Recovery Plan
+description: DR procedures, RTO/RPO targets, and recovery runbooks for the GovTech platform
+---
+
+## Overview
+
+The GovTech platform disaster recovery plan defines procedures to restore services after catastrophic failures. This document is based on `platform/disaster-recovery/runbooks/DR_PLAN.md`.
+
+## Recovery Objectives
+
+<CardGroup cols={2}>
+  <Card title="RTO: 4 Hours" icon="clock">
+    **Recovery Time Objective**
+    
+    Maximum time to fully restore service after a disaster
+  </Card>
+  <Card title="RPO: 24 Hours" icon="database">
+    **Recovery Point Objective**
+    
+    Maximum acceptable data loss (daily backups at 2am UTC)
+  </Card>
+</CardGroup>
+
+### Availability Target
+
+| Metric | Target | Allowed Downtime |
+|--------|--------|------------------|
+| Availability | 99.9% | 8.7 hours/year |
+| RTO | 4 hours | Complete service restoration |
+| RPO | 24 hours | Last backup at 2am UTC |
+
+## Disaster Scenarios
+
+### 1. Availability Zone Failure
+
+**Probability**: Low | **Impact**: High
+
+<Info>
+**Auto-Recovery**: AWS Multi-AZ architecture handles this automatically
+
+- **RDS**: Automatic failover to standby replica in another AZ (1-2 minutes)
+- **EKS**: Pods redistribute to nodes in other AZs automatically
+- **ALB**: Always distributes traffic across multiple AZs
+
+**Action Required**: None. Failover is automatic.
+</Info>
+
+### 2. Complete Region Failure
+
+**Probability**: Very Low | **Impact**: Critical
+
+<Warning>
+This scenario requires manual recovery. The current architecture is single-region (us-east-1).
+</Warning>
+
+**Recovery Procedure**: [Complete Region Restoration](#region-restoration)
+
+**Estimated Time**: 2-4 hours
+
+### 3. Database Corruption or Accidental Deletion
+
+**Probability**: Medium | **Impact**: High
+
+RDS has automatic daily backups:
+- **Production**: 30-day retention
+- **Development**: 3-day retention
+
+**Recovery Procedure**: [Database Restoration](#database-restoration)
+
+**Estimated Time**: 20-45 minutes
+
+### 4. Security Breach
+
+**Probability**: Low | **Impact**: Very High
+
+**Recovery Procedure**: [Security Incident Response](#security-response)
+
+**Immediate Action**: 15 minutes to containment
+
+### 5. EKS Cluster Failure
+
+**Probability**: Low | **Impact**: High
+
+<Info>
+EKS control plane is managed by AWS (99.95% SLA). Worker node failures are handled automatically by Node Groups.
+
+**Action**: If entire Node Group fails, recreate with Terraform.
+</Info>
+
+### 6. Terraform State Deletion
+
+**Probability**: Low | **Impact**: High
+
+Terraform state in S3 has versioning enabled. Previous states can be recovered.
+
+```bash
+# List versions of state file
+aws s3api list-object-versions \
+  --bucket govtech-terraform-state-835960996869 \
+  --prefix prod/terraform.tfstate
+
+# Restore previous version
+aws s3api get-object \
+  --bucket govtech-terraform-state-835960996869 \
+  --key prod/terraform.tfstate \
+  --version-id <VERSION_ID> \
+  terraform.tfstate.restored
+```
+
+## Recovery Procedures
+
+### Region Restoration
+
+<Steps>
+  <Step title="Phase 1: Infrastructure (45-90 min)">
+    Deploy infrastructure in alternate region using Terraform
+    
+    ```bash
+    cd terraform/environments/prod
+    
+    # Update region in terraform.tfvars
+    sed -i 's/us-east-1/us-east-2/g' terraform.tfvars
+    
+    # Apply infrastructure
+    terraform init
+    terraform plan
+    terraform apply
+    ```
+  </Step>
+
+  <Step title="Phase 2: Database (30-60 min)">
+    Restore RDS from snapshot (copy snapshot cross-region first)
+    
+    ```bash
+    # Copy snapshot to new region
+    aws rds copy-db-snapshot \
+      --source-db-snapshot-identifier arn:aws:rds:us-east-1:ACCOUNT:snapshot:NAME \
+      --target-db-snapshot-identifier govtech-prod-restore \
+      --region us-east-2
+    
+    # Restore from snapshot
+    ./disaster-recovery/scripts/restore-infrastructure.sh \
+      --region us-east-2 \
+      --environment prod
+    ```
+  </Step>
+
+  <Step title="Phase 3: Application (15-30 min)">
+    Deploy application to new EKS cluster
+    
+    ```bash
+    # Connect to new cluster
+    aws eks update-kubeconfig --name govtech-prod --region us-east-2
+    
+    # Deploy application
+    kubectl apply -f kubernetes/
+    kubectl rollout status deployment/backend -n govtech
+    kubectl rollout status deployment/frontend -n govtech
+    ```
+  </Step>
+
+  <Step title="Phase 4: DNS (5-15 min)">
+    Update Route53 to point to new ALB
+    
+    ```bash
+    # Get new ALB DNS
+    kubectl get ingress govtech-ingress -n govtech \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+    
+    # Update Route53 record (manually or via Terraform)
+    # Point govtech.example.com to new ALB
+    ```
+  </Step>
+</Steps>
+
+**Automated Script**:
+
+```bash disaster-recovery/scripts/restore-infrastructure.sh
+chmod +x disaster-recovery/scripts/restore-infrastructure.sh
+./disaster-recovery/scripts/restore-infrastructure.sh \
+  --region us-east-2 \
+  --environment prod
+```
+
+### Database Restoration
+
+<AccordionGroup>
+  <Accordion title="List Available Snapshots">
+    ```bash
+    aws rds describe-db-snapshots \
+      --db-instance-identifier govtech-prod-postgres \
+      --query 'DBSnapshots[*].{Date:SnapshotCreateTime,ID:DBSnapshotIdentifier}' \
+      --output table
+    ```
+  </Accordion>
+
+  <Accordion title="Restore from Latest Snapshot">
+    ```bash
+    chmod +x disaster-recovery/scripts/restore-database.sh
+    
+    ./disaster-recovery/scripts/restore-database.sh \
+      --snapshot latest \
+      --environment prod
+    ```
+    
+    <Warning>
+    **Production Approval Required**
+    
+    The script requires approval code: `RESTORE-PROD-YYYYMMDD`
+    
+    Example: `RESTORE-PROD-20260303`
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Restore from Specific Snapshot">
+    ```bash
+    ./disaster-recovery/scripts/restore-database.sh \
+      --snapshot rds:govtech-prod-postgres-2026-03-01-02-00 \
+      --environment prod
+    ```
+  </Accordion>
+
+  <Accordion title="Update Application Configuration">
+    After restoration, update the application to use the new database:
+    
+    ```bash
+    # Get new database endpoint
+    NEW_ENDPOINT=$(aws rds describe-db-instances \
+      --db-instance-identifier govtech-prod-postgres-restored-TIMESTAMP \
+      --query 'DBInstances[0].Endpoint.Address' \
+      --output text)
+    
+    # Update ConfigMap
+    kubectl edit configmap govtech-config -n govtech
+    # Update DB_HOST to $NEW_ENDPOINT
+    
+    # Restart backend
+    kubectl rollout restart deployment/backend -n govtech
+    
+    # Verify
+    ./tests/e2e/test-deployment.sh
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Security Response
+
+**Timeline** for security breach response:
+
+<Steps>
+  <Step title="T+0 min: Detection">
+    Detection via CloudWatch alarm, GuardDuty, or security report
+  </Step>
+
+  <Step title="T+5 min: Notification">
+    Alert on-call team (phone call, not just Slack message)
+  </Step>
+
+  <Step title="T+15 min: Containment">
+    Revoke compromised credentials immediately
+    
+    ```bash
+    chmod +x disaster-recovery/scripts/security-response.sh
+    ./disaster-recovery/scripts/security-response.sh \
+      --user <compromised-user>
+    ```
+  </Step>
+
+  <Step title="T+30 min: Scope Assessment">
+    Determine extent of breach:
+    - Check CloudTrail logs
+    - Review GuardDuty findings
+    - Identify affected resources
+  </Step>
+
+  <Step title="T+60 min: Remediation Decision">
+    Decide: restore from clean backup OR patch in place
+  </Step>
+
+  <Step title="T+120 min: Notification">
+    If data compromised, notify affected parties per regulations
+  </Step>
+</Steps>
+
+## Responsibility Matrix
+
+| Scenario | Detection | Response | Approval |
+|----------|-----------|----------|----------|
+| AZ Failure | CloudWatch (auto) | - | - |
+| Region Failure | On-call / CloudWatch | Infrastructure + DevOps | Project Lead |
+| DB Corruption | DevOps / Users | Infrastructure | Project Lead |
+| Security Breach | DevOps / Security | Entire Team | Lead + Authorities |
+
+## DR Testing Schedule
+
+Regular testing ensures the DR plan works when needed:
+
+| Test | Frequency | Type |
+|------|-----------|------|
+| DB backup restoration (dev) | Monthly | Automated |
+| RDS Multi-AZ failover | Quarterly | Simulated |
+| EKS cluster recreation (dev) | Semi-annually | Manual |
+| Full region disaster drill | Annually | Manual |
+
+### Test Backup Restoration
+
+```bash
+# Verify backup without actual restoration
+./disaster-recovery/scripts/restore-database.sh \
+  --snapshot latest \
+  --environment dev \
+  --verify-only
+```
+
+## Emergency Contacts
+
+| Role | Responsibility | Contact |
+|------|----------------|----------|
+| Project Lead | Final restoration approval | Phone (24/7) |
+| Infrastructure | Terraform, VPC, RDS | Slack #govtech-infra |
+| Deployment | Kubernetes, application | Slack #govtech-deploy |
+| DevOps | CI/CD, monitoring | Slack #govtech-devops |
+
+<Warning>
+**Escalation Policy**
+
+If no progress after 30 minutes, escalate to next level immediately.
+</Warning>
+
+## Recovery Checklist
+
+Use this checklist for any disaster scenario:
+
+- [ ] Identify and document incident (time, probable cause, scope)
+- [ ] Notify team and project lead
+- [ ] Determine disaster scenario (1-6 above)
+- [ ] Execute corresponding procedure
+- [ ] Verify service restoration: `./tests/e2e/test-deployment.sh`
+- [ ] Communicate to users if downtime occurred
+- [ ] Document post-mortem (root cause, actions taken, prevention)
+- [ ] Update DR plan if gaps found in procedure
+
+## Backup Locations
+
+### RDS Snapshots
+- **Location**: AWS RDS automated backups
+- **Retention**: 30 days (prod), 3 days (dev)
+- **Encryption**: KMS encrypted
+- **Region**: us-east-1 (same as primary)
+
+### Application Backups
+- **Location**: S3 bucket `govtech-{env}-app-storage-835960996869`
+- **Prefix**: `backups/postgresql/`
+- **Format**: pg_dump custom format (compressed)
+- **Retention**: 30 days
+- **Schedule**: Daily at 2am UTC
+
+### Terraform State
+- **Location**: S3 bucket `govtech-terraform-state-835960996869`
+- **Versioning**: Enabled
+- **Encryption**: KMS encrypted
+- **Backup**: All versions retained indefinitely
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Backup & Restore" icon="database" href="/operations/backup-restore">
+    Detailed backup procedures and restoration steps
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

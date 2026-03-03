@@ -1,0 +1,636 @@
+---
+title: 'Kubernetes Deployment'
+description: 'Deploy applications to EKS cluster using Kubernetes manifests'
+---
+
+## Overview
+
+This guide covers deploying the GovTech platform applications (frontend, backend, and database) to the EKS cluster using Kubernetes manifests.
+
+## Prerequisites
+
+Before deploying to Kubernetes:
+
+- Terraform infrastructure deployed successfully
+- kubectl configured with EKS cluster access
+- Docker images built and pushed to ECR (if using custom images)
+
+## Deployment Architecture
+
+The application consists of:
+
+- **Frontend**: React application served by Nginx (3 replicas)
+- **Backend**: Node.js API server (3 replicas)
+- **Database**: PostgreSQL StatefulSet (1 replica in dev, can scale in prod)
+- **Ingress**: AWS Application Load Balancer for external access
+
+## Quick Deployment
+
+Use the automated deployment script:
+
+```bash
+cd platform/kubernetes
+
+# Deploy to dev environment (default)
+./deploy.sh
+
+# Deploy to specific environment
+./deploy.sh dev
+./deploy.sh staging
+./deploy.sh prod
+```
+
+<Warning>
+  Production deployment requires confirmation. You must type `PRODUCCION` when prompted.
+</Warning>
+
+## Deployment Script Overview
+
+The `deploy.sh` script performs the following steps:
+
+<Steps>
+  <Step title="Connect to EKS Cluster">
+    ```bash kubernetes/deploy.sh
+    aws eks update-kubeconfig --name "govtech-${ENVIRONMENT}" --region us-east-1
+    ```
+    
+    Configures kubectl to connect to the correct cluster.
+  </Step>
+
+  <Step title="Apply Namespace and RBAC">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f namespace.yaml
+    kubectl apply -f rbac.yaml
+    kubectl apply -f configmap.yaml
+    kubectl apply -f pdb.yaml
+    ```
+    
+    Creates namespace with Pod Security Standards and applies RBAC policies.
+  </Step>
+
+  <Step title="Verify Secrets Exist">
+    ```bash kubernetes/deploy.sh
+    kubectl get secret govtech-secrets -n govtech
+    ```
+    
+    Ensures database credentials secret exists before deployment.
+  </Step>
+
+  <Step title="Deploy Persistent Volumes">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f pvc.yaml
+    ```
+    
+    Creates PersistentVolumeClaims for database storage.
+  </Step>
+
+  <Step title="Deploy Database">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f database/
+    kubectl wait --for=condition=ready pod -l app=postgres -n govtech --timeout=300s
+    ```
+    
+    Deploys PostgreSQL StatefulSet and waits for it to be ready.
+  </Step>
+
+  <Step title="Deploy Backend">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f backend/
+    kubectl rollout status deployment/backend -n govtech --timeout=300s
+    ```
+    
+    Deploys backend API and waits for rollout to complete.
+  </Step>
+
+  <Step title="Deploy Frontend">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f frontend/
+    kubectl rollout status deployment/frontend -n govtech --timeout=300s
+    ```
+    
+    Deploys frontend application and waits for rollout to complete.
+  </Step>
+
+  <Step title="Apply Network Policies">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f network-policies.yaml
+    ```
+    
+    Applies Zero-Trust network policies to control pod-to-pod traffic.
+  </Step>
+
+  <Step title="Create Ingress">
+    ```bash kubernetes/deploy.sh
+    kubectl apply -f ingress/ingress-aws.yaml
+    ```
+    
+    Creates AWS Application Load Balancer for external access.
+  </Step>
+</Steps>
+
+## Manual Deployment Steps
+
+For more control, deploy components manually:
+
+### 1. Create Kubernetes Secret
+
+Before deploying, create the secret with database credentials:
+
+```bash
+kubectl create secret generic govtech-secrets \
+  --from-literal=DB_PASSWORD=your-secure-password \
+  --from-literal=DB_USER=govtech_admin \
+  --from-literal=DB_NAME=govtech \
+  -n govtech
+
+# Verify secret
+kubectl get secret govtech-secrets -n govtech
+```
+
+### 2. Deploy Namespace
+
+The namespace includes Pod Security Standards:
+
+```yaml kubernetes/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: govtech
+  labels:
+    name: govtech
+    environment: production
+    managed-by: terraform
+    # Pod Security Standards
+    pod-security.kubernetes.io/enforce: "baseline"
+    pod-security.kubernetes.io/enforce-version: "latest"
+    pod-security.kubernetes.io/warn: "restricted"
+    pod-security.kubernetes.io/warn-version: "latest"
+    pod-security.kubernetes.io/audit: "restricted"
+    pod-security.kubernetes.io/audit-version: "latest"
+```
+
+**Security Levels:**
+- `enforce: baseline` - Blocks privileged pods and host access
+- `warn: restricted` - Shows warnings for non-compliant pods
+- `audit: restricted` - Logs violations to CloudTrail
+
+Apply:
+```bash
+kubectl apply -f kubernetes/namespace.yaml
+```
+
+### 3. Deploy ConfigMap
+
+Application configuration:
+
+```yaml kubernetes/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: govtech-config
+  namespace: govtech
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  CLOUD_PROVIDER: "aws"
+  AWS_REGION: "us-east-1"
+  LOG_LEVEL: "info"
+  ENABLE_MONITORING: "true"
+  ENABLE_CACHE: "true"
+  ENABLE_RATE_LIMITING: "true"
+```
+
+Apply:
+```bash
+kubectl apply -f kubernetes/configmap.yaml
+```
+
+### 4. Deploy Database (StatefulSet)
+
+PostgreSQL runs as a StatefulSet for persistent storage:
+
+```yaml kubernetes/database/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: govtech
+spec:
+  replicas: 1
+  serviceName: postgres
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp2
+        resources:
+          requests:
+            storage: 20Gi
+  template:
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: govtech-secrets
+              key: DB_PASSWORD
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+```
+
+**Key Features:**
+- StatefulSet provides stable pod names (postgres-0)
+- PersistentVolumeClaim attached to pod (survives restarts)
+- Health checks with `pg_isready`
+- Non-root security context
+
+Deploy:
+```bash
+kubectl apply -f kubernetes/database/
+
+# Wait for database to be ready
+kubectl wait --for=condition=ready pod -l app=postgres -n govtech --timeout=300s
+
+# Check status
+kubectl get pods -n govtech -l app=postgres
+```
+
+### 5. Deploy Backend
+
+Node.js API backend:
+
+```yaml kubernetes/backend/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: govtech
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    spec:
+      containers:
+      - name: backend
+        image: 835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend:latest
+        ports:
+        - containerPort: 3000
+        envFrom:
+        - configMapRef:
+            name: govtech-config
+        - secretRef:
+            name: govtech-secrets
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+```
+
+**Deployment Strategy:**
+- **RollingUpdate**: Deploy new version gradually
+- **maxSurge: 1**: Allow 1 extra pod during update
+- **maxUnavailable: 0**: Ensure zero downtime
+
+Deploy:
+```bash
+kubectl apply -f kubernetes/backend/
+
+# Watch rollout progress
+kubectl rollout status deployment/backend -n govtech
+
+# Check pods
+kubectl get pods -n govtech -l app=backend
+```
+
+### 6. Deploy Frontend
+
+React frontend served by Nginx:
+
+```yaml kubernetes/frontend/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: govtech
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: frontend
+        image: 835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-frontend:latest
+        ports:
+        - containerPort: 80
+        env:
+        - name: REACT_APP_API_URL
+          value: "http://backend-service"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: cache
+          mountPath: /var/cache/nginx
+        - name: run
+          mountPath: /var/run
+      volumes:
+      - name: cache
+        emptyDir: {}
+      - name: run
+        emptyDir: {}
+```
+
+Deploy:
+```bash
+kubectl apply -f kubernetes/frontend/
+kubectl rollout status deployment/frontend -n govtech
+```
+
+### 7. Deploy Ingress (AWS ALB)
+
+Application Load Balancer for external access:
+
+```yaml kubernetes/ingress/ingress-aws.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: govtech-ingress
+  namespace: govtech
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+spec:
+  rules:
+    - host: govtech.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+```
+
+**Routing:**
+- `/api/*` → Backend service
+- `/*` → Frontend service
+
+Deploy:
+```bash
+kubectl apply -f kubernetes/ingress/ingress-aws.yaml
+
+# Wait for ALB creation (2-3 minutes)
+sleep 30
+
+# Get ALB DNS name
+kubectl get ingress govtech-ingress -n govtech
+```
+
+## Verifying Deployment
+
+### Check All Resources
+
+```bash
+# Check pods
+kubectl get pods -n govtech
+
+# Check services
+kubectl get services -n govtech
+
+# Check ingress
+kubectl get ingress -n govtech
+
+# Check all resources
+kubectl get all -n govtech
+```
+
+### View Logs
+
+```bash
+# Backend logs
+kubectl logs -f deployment/backend -n govtech
+
+# Frontend logs
+kubectl logs -f deployment/frontend -n govtech
+
+# Database logs
+kubectl logs -f statefulset/postgres -n govtech
+
+# Logs from specific pod
+kubectl logs <pod-name> -n govtech
+```
+
+### Test Application
+
+```bash
+# Get ALB URL
+ALB_URL=$(kubectl get ingress govtech-ingress -n govtech -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Test backend health
+curl http://$ALB_URL/api/health
+
+# Test frontend
+curl http://$ALB_URL/
+```
+
+## Scaling Applications
+
+### Manual Scaling
+
+```bash
+# Scale backend to 5 replicas
+kubectl scale deployment/backend --replicas=5 -n govtech
+
+# Scale frontend to 5 replicas
+kubectl scale deployment/frontend --replicas=5 -n govtech
+
+# Verify
+kubectl get pods -n govtech
+```
+
+### Horizontal Pod Autoscaler (HPA)
+
+HPA automatically scales based on CPU/memory:
+
+```yaml kubernetes/backend/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: govtech
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+
+Apply:
+```bash
+kubectl apply -f kubernetes/backend/hpa.yaml
+kubectl get hpa -n govtech
+```
+
+## Updating Applications
+
+### Rolling Update
+
+```bash
+# Update backend image
+kubectl set image deployment/backend backend=835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend:v2.0 -n govtech
+
+# Watch rollout
+kubectl rollout status deployment/backend -n govtech
+
+# Check rollout history
+kubectl rollout history deployment/backend -n govtech
+```
+
+### Rollback Deployment
+
+```bash
+# Rollback to previous version
+kubectl rollout undo deployment/backend -n govtech
+
+# Rollback to specific revision
+kubectl rollout undo deployment/backend --to-revision=2 -n govtech
+```
+
+See [Rollback Procedures](/deployment/rollback-procedures) for detailed recovery steps.
+
+## Network Policies
+
+Zero-Trust network policies control traffic:
+
+```yaml kubernetes/network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-network-policy
+  namespace: govtech
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+```
+
+Apply:
+```bash
+kubectl apply -f kubernetes/network-policies.yaml
+kubectl get networkpolicies -n govtech
+```
+
+## Troubleshooting
+
+### Pods Not Starting
+
+```bash
+# Describe pod to see events
+kubectl describe pod <pod-name> -n govtech
+
+# Check events
+kubectl get events -n govtech --sort-by='.lastTimestamp'
+```
+
+### ImagePullBackOff Error
+
+```bash
+# Verify ECR authentication
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 835960996869.dkr.ecr.us-east-1.amazonaws.com
+
+# Check if image exists
+aws ecr list-images --repository-name govtech-backend --region us-east-1
+```
+
+### CrashLoopBackOff
+
+```bash
+# View logs from crashed pod
+kubectl logs <pod-name> -n govtech --previous
+
+# Check resource limits
+kubectl describe pod <pod-name> -n govtech
+```
+
+### Service Not Accessible
+
+```bash
+# Check service endpoints
+kubectl get endpoints -n govtech
+
+# Port-forward for testing
+kubectl port-forward service/backend-service 8080:80 -n govtech
+curl http://localhost:8080/api/health
+```
+
+## Next Steps
+
+1. [Understand environment differences](/deployment/environments)
+2. [Set up monitoring and observability](/monitoring/overview)
+3. [Configure rollback procedures](/deployment/rollback-procedures)

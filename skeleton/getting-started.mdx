@@ -1,0 +1,182 @@
+---
+title: Getting Started with Skeleton
+description: Quick start guide to using the GovTech Multicloud Platform skeleton template
+---
+
+The skeleton template is a production-ready infrastructure foundation for the GovTech Multicloud Platform. It includes pre-configured infrastructure, Kubernetes manifests, security policies, and a demo application that you replace with your own application.
+
+## What's Included
+
+The skeleton provides:
+
+- Multi-cloud infrastructure as code (Terraform)
+- Kubernetes deployment manifests
+- IAM policies and security configuration
+- Disaster recovery plan with RTO 4h / RPO 24h
+- Demo frontend (React + Vite) and backend (Express.js)
+- Docker Compose for local development
+- CI/CD authentication setup
+
+## Repository Structure
+
+The skeleton template is organized as follows:
+
+```
+skeleton/
+  app/
+    backend/          Replace with your backend application
+    frontend/         Replace with your frontend application
+  aws/iam/            IAM policies (extend as needed)
+  docs/
+    architecture/     Diagrams and multi-cloud guides
+    deployment/       Deployment and rollback procedures
+  kubernetes/         K8s manifests (update image names)
+  security/           Security policies
+  terraform/          Infrastructure as code (VPC, EKS, RDS, security)
+  disaster-recovery/  DR plan with runbooks
+  docker-compose.yml  Local development environment
+```
+
+<Steps>
+
+### Choose Your Cloud Provider
+
+The platform supports AWS, OCI, GCP, and Azure. Define your provider by setting the `CLOUD_PROVIDER` variable in your `.env` file:
+
+| Provider | Variable | Documentation |
+|----------|----------|---------------|
+| AWS | `CLOUD_PROVIDER=aws` | See `docs/architecture/MULTI_CLOUD_SERVICES.md` |
+| OCI | `CLOUD_PROVIDER=oci` | See `docs/architecture/MULTI_CLOUD_SERVICES.md` |
+| GCP | `CLOUD_PROVIDER=gcp` | See `docs/architecture/MULTI_CLOUD_SERVICES.md` |
+| Azure | `CLOUD_PROVIDER=azure` | See `docs/architecture/MULTI_CLOUD_SERVICES.md` |
+
+For your chosen provider, you'll need to implement 4 services in `app/backend/src/services/providers/<provider>/`. See the [Multi-Cloud Services documentation](/architecture/multi-cloud-services) for interface contracts and service scaffolding.
+
+### Configure Environment Variables
+
+Copy the example environment file and fill in your values:
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials and configuration
+```
+
+Minimum required variables:
+
+```env
+# Cloud provider selection
+CLOUD_PROVIDER=aws
+
+# Database
+DATABASE_URL=postgresql://user:password@host:5432/database_name
+
+# AWS (if using AWS)
+AWS_REGION=us-east-1
+AWS_ACCOUNT_ID=your-account-id
+
+# OCI (if using OCI)
+# OCI_REGION=us-ashburn-1
+# OCI_NAMESPACE=your-namespace
+# OCI_TENANCY_ID=ocid1.tenancy...
+
+# GCP (if using GCP)
+# GCP_PROJECT_ID=your-project
+# GCP_REGION=us-central1
+
+# Azure (if using Azure)
+# AZURE_TENANT_ID=your-tenant
+# AZURE_SUBSCRIPTION_ID=your-subscription
+```
+
+### Test Locally
+
+Run the entire stack locally using Docker Compose:
+
+```bash
+# Start all services
+docker-compose up -d
+
+# Verify backend is responding
+curl http://localhost:3000/api/health
+
+# View logs
+docker-compose logs -f backend
+```
+
+The demo application will be available at:
+- Frontend: `http://localhost:80`
+- Backend: `http://localhost:3000`
+- Database: `localhost:5432`
+
+### Deploy Infrastructure
+
+Deploy the cloud infrastructure using Terraform:
+
+```bash
+# 1. Initialize Terraform
+cd terraform/environments/dev
+terraform init
+
+# 2. Review the plan (resources to be created)
+terraform plan
+
+# 3. Create infrastructure (VPC, EKS, RDS, security)
+terraform apply
+```
+
+See the [Deployment Guide](/deployment/deployment-guide) for the complete production deployment process.
+
+### Configure IAM
+
+Set up IAM groups and policies:
+
+```bash
+# Create IAM groups and policies
+cd aws/iam
+bash setup-iam-v2.sh
+
+# Verify groups were created
+aws iam list-groups --query 'Groups[].GroupName'
+```
+
+See [IAM Security Policies](/security/iam-policies) for descriptions of each group and their permissions.
+
+### Deploy to Kubernetes
+
+Build and deploy your application to Kubernetes:
+
+```bash
+# Build and push images to registry
+docker build -t your-registry/backend:v1.0 app/backend/
+docker push your-registry/backend:v1.0
+
+# Update image references in kubernetes/ manifests
+# Search for "REEMPLAZAR" in the YAML files
+
+# Deploy to Kubernetes
+bash kubernetes/deploy.sh
+```
+
+</Steps>
+
+## Key Documentation
+
+| Document | Description |
+|----------|-------------|
+| `docs/architecture/MULTI_CLOUD_SERVICES.md` | How to implement your cloud provider |
+| `docs/deployment/DEPLOYMENT_GUIDE.md` | Complete production deployment |
+| `docs/deployment/ROLLBACK_GUIDE.md` | Emergency rollback procedures |
+| `docs/IAM_SECURITY_POLICIES.md` | IAM policies and access groups |
+| `disaster-recovery/runbooks/DR_PLAN.md` | Disaster recovery plan |
+| `terraform/README.md` | Terraform module usage |
+| `kubernetes/README.md` | Kubernetes manifests |
+
+## Estimated Timeline
+
+**Time to adapt the platform to your application:** 2-3 days for a team with cloud experience. The infrastructure is ready; you only need to replace the application layer.
+
+## Next Steps
+
+- [Customize the skeleton](/skeleton/customization) to replace the demo app with your application
+- [Integrate your application](/skeleton/application-integration) with the cloud services
+- Review the [Multi-Cloud Services architecture](/architecture/multi-cloud-services)

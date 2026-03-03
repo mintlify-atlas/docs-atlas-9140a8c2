@@ -1,0 +1,269 @@
+---
+title: Security Overview
+description: Comprehensive security architecture and principles for the GovTech Multicloud Platform
+---
+
+## Security Principles
+
+The GovTech Multicloud Platform implements a **defense-in-depth** security strategy with multiple layers of protection:
+
+<CardGroup cols={2}>
+  <Card title="Least Privilege" icon="shield-check">
+    Every user and service receives only the permissions necessary for their specific function
+  </Card>
+  <Card title="Zero Trust Network" icon="network-wired">
+    All network communication is explicitly allowed; default deny for all traffic
+  </Card>
+  <Card title="Encryption Everywhere" icon="lock">
+    Data encrypted at rest and in transit using AWS KMS and TLS 1.3
+  </Card>
+  <Card title="Continuous Monitoring" icon="radar">
+    24/7 threat detection with CloudTrail, GuardDuty, and Security Hub
+  </Card>
+</CardGroup>
+
+## Security Layers
+
+Our security architecture consists of five critical layers:
+
+### 1. Identity and Access Management (IAM)
+
+**Three-tier functional hierarchy** based on risk level:
+
+- **Level 1 - Critical**: Network Admin, EKS Admin, Database Admin, Terraform Operator
+- **Level 2 - Operational**: Container Deploy, ALB Operator, CI/CD Operator  
+- **Level 3 - Read Only**: Secrets Read, Monitor, Security Auditor
+
+<Note>
+All Level 1 (Critical) access requires:
+- Hardware MFA (YubiKey recommended)
+- Approval from a second responsible party
+- Time-limited sessions (maximum 8 hours)
+- Immediate CloudWatch alerts on all actions
+</Note>
+
+### 2. Network Security
+
+**Zero Trust Networking** with Kubernetes NetworkPolicies:
+
+```
+Architecture:
+  Internet → WAF → ALB → Ingress Controller → Frontend Pods
+                                             ↓
+                                          Backend Pods
+                                             ↓
+                                         Database Pods
+```
+
+- Frontend can only communicate with Backend
+- Backend can only communicate with Database and AWS APIs (port 443)
+- Database cannot initiate any outbound connections
+- Default deny all traffic policy
+
+### 3. Encryption & Key Management
+
+**AWS KMS (Key Management Service)** provides centralized encryption:
+
+- **RDS Databases**: Encrypted at rest with KMS
+- **S3 Buckets**: Server-side encryption (SSE-KMS)
+- **EBS Volumes**: Encrypted volumes for Kubernetes PVCs
+- **Secrets Manager**: All secrets encrypted with KMS
+- **CloudTrail Logs**: Encrypted audit logs
+- **Automatic Key Rotation**: Annual rotation enabled
+
+### 4. Threat Detection
+
+**Three-layer monitoring system**:
+
+<Steps>
+  <Step title="CloudTrail - Audit Logging">
+    Records every API call made in the AWS account:
+    - Who performed the action
+    - When it occurred
+    - Source IP address
+    - Success or failure
+  </Step>
+  
+  <Step title="GuardDuty - Threat Detection">
+    AI-powered intrusion detection analyzing:
+    - VPC Flow Logs for suspicious network traffic
+    - CloudTrail for unusual API activity
+    - DNS logs for communication with malicious domains
+    - EKS audit logs for Kubernetes threats
+  </Step>
+  
+  <Step title="Security Hub - Centralized Dashboard">
+    Aggregates findings from:
+    - GuardDuty (threats)
+    - IAM Access Analyzer (excessive permissions)
+    - Amazon Inspector (vulnerabilities)
+    - CIS AWS Foundations Benchmark compliance
+  </Step>
+</Steps>
+
+### 5. Application Protection
+
+**AWS WAF (Web Application Firewall)** protects the application from:
+
+- SQL injection attacks
+- Cross-site scripting (XSS)
+- Known malicious inputs (Log4Shell, SSRF)
+- Botnet and Tor exit node traffic
+- Rate limiting (2000 requests per IP per 5 minutes)
+
+## Compliance Frameworks
+
+The platform is designed to meet government security requirements:
+
+<AccordionGroup>
+  <Accordion title="CIS AWS Foundations Benchmark v1.4.0">
+    Automated compliance checking for:
+    - IAM password policies
+    - MFA enforcement
+    - Root account security
+    - VPC security group rules
+    - S3 bucket public access
+    - CloudTrail configuration
+  </Accordion>
+  
+  <Accordion title="AWS Foundational Security Best Practices">
+    Continuous monitoring of:
+    - Encryption at rest and in transit
+    - Least privilege access
+    - Network segmentation
+    - Logging and monitoring
+    - Incident response readiness
+  </Accordion>
+  
+  <Accordion title="FISMA / FedRAMP Ready">
+    Government-grade security controls:
+    - Multi-factor authentication
+    - Audit trail retention (365 days in production)
+    - Encryption key management
+    - Access control separation
+    - Continuous monitoring
+  </Accordion>
+</AccordionGroup>
+
+## Security Incident Response
+
+### Alert Levels
+
+| Severity | Trigger | Response Time | Action |
+|----------|---------|---------------|--------|
+| **Critical** | Root account usage, unauthorized API calls | Immediate | Alert DevOps team, investigate within 15 minutes |
+| **High** | GuardDuty finding, suspicious network activity | 1 hour | Review logs, assess impact, contain threat |
+| **Medium** | Cost anomaly, unusual deployment | 4 hours | Investigate source, validate legitimacy |
+| **Low** | Security Hub compliance drift | 24 hours | Review configuration, plan remediation |
+
+### Automated Responses
+
+<Warning>
+**Automatic Protective Actions:**
+- IP addresses exceeding rate limits are blocked by WAF
+- Sessions without MFA cannot access Level 1 resources
+- Production database deletion is prevented by IAM policy
+- Operations outside us-east-1 region are denied
+</Warning>
+
+## Security Best Practices
+
+### For Developers
+
+<CodeGroup>
+```bash Development Environment
+# Never commit secrets to Git
+cp kubernetes/secrets.yaml.template kubernetes/secrets.yaml
+echo "secrets.yaml" >> .gitignore
+
+# Use AWS Secrets Manager via IRSA
+# No hardcoded credentials in code
+```
+
+```javascript Backend Code
+// ✅ Correct: Use IRSA to access Secrets Manager
+const AWS = require('aws-sdk');
+const secretsManager = new AWS.SecretsManager();
+
+const secret = await secretsManager
+  .getSecretValue({ SecretId: 'govtech/prod/db-credentials' })
+  .promise();
+
+// ❌ Wrong: Hardcoded credentials
+const dbPassword = 'my-secret-password'; // NEVER DO THIS
+```
+</CodeGroup>
+
+### For DevOps Engineers
+
+1. **Always use MFA** for AWS console and CLI access
+2. **Rotate access keys** every 90 days (preferably use temporary credentials)
+3. **Review CloudTrail logs** weekly for unusual activity
+4. **Test Network Policies** before deploying to production
+5. **Scan container images** for vulnerabilities before pushing to ECR
+
+### For Security Auditors
+
+<Tabs>
+  <Tab title="Weekly Checks">
+    - Review GuardDuty findings
+    - Check for users without MFA
+    - Verify no public S3 buckets
+    - Confirm CloudTrail is enabled
+  </Tab>
+  
+  <Tab title="Monthly Audit">
+    - Review IAM permissions for least privilege
+    - Verify access key age (< 90 days)
+    - Check Security Hub compliance score
+    - Review WAF blocked requests
+    - Validate backup procedures
+  </Tab>
+  
+  <Tab title="Quarterly Review">
+    - Full IAM user and role audit
+    - Network security group review
+    - Secrets rotation verification
+    - Disaster recovery test
+    - Compliance report generation
+  </Tab>
+</Tabs>
+
+## Quick Verification Commands
+
+```bash
+# Check current IAM user and MFA status
+aws iam get-user
+aws iam list-mfa-devices
+
+# View recent CloudTrail events
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=Username,AttributeValue=$USER \
+  --max-results 10
+
+# List active access keys
+aws iam list-access-keys --user-name $USER
+
+# Check GuardDuty findings
+aws guardduty list-findings --detector-id <detector-id>
+
+# Verify Security Hub status
+aws securityhub get-findings --filters '{"SeverityLabel": [{"Value": "CRITICAL", "Comparison": "EQUALS"}]}'
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="IAM Policies" icon="users" href="/security/iam-policies">
+    Explore detailed IAM groups, roles, and permissions
+  </Card>
+  <Card title="Network Policies" icon="shield-halved" href="/security/network-policies">
+    Understand Kubernetes network segmentation
+  </Card>
+  <Card title="Secrets Management" icon="key" href="/security/secrets-management">
+    Learn how to securely manage credentials
+  </Card>
+  <Card title="Compliance" icon="clipboard-check" href="/security/compliance">
+    Review audit procedures and compliance reports
+  </Card>
+</CardGroup>

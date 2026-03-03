@@ -1,0 +1,162 @@
+---
+title: Cloud provider comparison
+description: Compare AWS, OCI, GCP, and Azure service mappings for the GovTech platform
+---
+
+The GovTech Multicloud Platform uses a cloud-agnostic architecture that allows you to deploy on any major cloud provider without rewriting your application code. This page compares the equivalent services across all supported providers.
+
+## Service mapping
+
+Each cloud provider offers similar services with different names and APIs. The platform abstracts these differences through service interfaces:
+
+| Interface | AWS | OCI | GCP | Azure |
+|---|---|---|---|---|
+| **StorageService** | S3 | Object Storage | Cloud Storage | Blob Storage |
+| **DatabaseService** | RDS PostgreSQL | DB Service | Cloud SQL | DB for PostgreSQL |
+| **MonitoringService** | CloudWatch | Monitoring | Cloud Operations | Azure Monitor |
+| **AuthService** | IAM / Cognito | Identity Cloud Service | Firebase Auth / IAM | Azure Active Directory |
+| **Container Registry** | ECR | OCIR | Artifact Registry | ACR |
+| **Kubernetes** | EKS | OKE | GKE | AKS |
+| **Load Balancer** | ALB / ELB | Load Balancer | Cloud Load Balancing | Azure Load Balancer |
+| **DNS** | Route 53 | DNS | Cloud DNS | Azure DNS |
+| **Secrets** | Secrets Manager | Vault Service | Secret Manager | Key Vault |
+| **CI/CD Auth** | OIDC + IAM Role | OIDC + IAM | Workload Identity | Managed Identity |
+
+## Implementation status
+
+<CardGroup cols={2}>
+  <Card title="AWS" icon="aws" iconType="solid">
+    **Status:** Fully implemented ✓
+    
+    Production-ready with complete Terraform modules, security controls, and CI/CD pipelines.
+  </Card>
+  
+  <Card title="OCI" icon="server">
+    **Status:** Structure ready
+    
+    Service interfaces defined. Implementation time: 3-4 days.
+  </Card>
+  
+  <Card title="GCP" icon="google">
+    **Status:** Structure ready
+    
+    Service interfaces defined. Implementation time: 3-4 days.
+  </Card>
+  
+  <Card title="Azure" icon="microsoft">
+    **Status:** Structure ready
+    
+    Service interfaces defined. Implementation time: 3-4 days.
+  </Card>
+</CardGroup>
+
+## How cloud portability works
+
+The platform uses the **Factory + Interface pattern** to achieve cloud portability:
+
+```
+Application (routes, controllers)
+    |
+    v
+ServiceFactory.getStorageService()   <-- reads CLOUD_PROVIDER from .env
+    |
+    +-- CLOUD_PROVIDER=aws   --> AwsStorageService
+    +-- CLOUD_PROVIDER=oci   --> OciStorageService
+    +-- CLOUD_PROVIDER=gcp   --> GcpStorageService
+    +-- CLOUD_PROVIDER=azure --> AzureStorageService
+```
+
+<Info>
+**Migration simplicity:** To migrate from AWS to OCI, change `CLOUD_PROVIDER=oci` in `.env` and implement the 4 service interfaces for OCI. The rest of your application code remains unchanged.
+</Info>
+
+## Required environment variables
+
+Each provider requires different environment variables:
+
+<Tabs>
+  <Tab title="AWS">
+    ```env
+    CLOUD_PROVIDER=aws
+    AWS_REGION=us-east-1
+    AWS_ACCOUNT_ID=835960996869
+    # Credentials injected via IRSA in Kubernetes
+    ```
+  </Tab>
+  
+  <Tab title="OCI">
+    ```env
+    CLOUD_PROVIDER=oci
+    OCI_REGION=us-ashburn-1
+    OCI_TENANCY_ID=ocid1.tenancy.oc1..xxx
+    OCI_USER_ID=ocid1.user.oc1..xxx
+    OCI_FINGERPRINT=xx:xx:xx:xx
+    OCI_PRIVATE_KEY_PATH=/secrets/oci-private-key.pem
+    OCI_NAMESPACE=govtech-namespace
+    ```
+  </Tab>
+  
+  <Tab title="GCP">
+    ```env
+    CLOUD_PROVIDER=gcp
+    GCP_PROJECT_ID=govtech-prod
+    GCP_REGION=us-central1
+    GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa-key.json
+    ```
+  </Tab>
+  
+  <Tab title="Azure">
+    ```env
+    CLOUD_PROVIDER=azure
+    AZURE_TENANT_ID=xxx
+    AZURE_CLIENT_ID=xxx
+    AZURE_SUBSCRIPTION_ID=xxx
+    AZURE_STORAGE_ACCOUNT=govtechstorage
+    # DefaultAzureCredential reads variables automatically
+    ```
+  </Tab>
+</Tabs>
+
+## What changes when migrating
+
+<Accordion title="What stays the same">
+  - Application code (Node.js / React)
+  - PostgreSQL database schema
+  - Kubernetes manifests (except storage classes)
+  - CI/CD pipelines (only container registry changes)
+  - Security policies and compliance requirements
+</Accordion>
+
+<Accordion title="What changes">
+  - Environment variables (endpoints, regions, credentials)
+  - Terraform infrastructure modules
+  - Container registry URL
+  - Monitoring dashboard queries
+  - Cost optimization strategies (provider-specific)
+</Accordion>
+
+## Cost comparison
+
+Estimated monthly costs for a production environment (2-10 nodes, Multi-AZ database, 24/7 uptime):
+
+| Provider | Estimated Cost | Notes |
+|---|---|---|
+| AWS | $335/month | EKS ($73) + RDS Multi-AZ ($50) + EC2 nodes ($150) + Data transfer |
+| OCI | $280/month | 20% lower compute costs, competitive database pricing |
+| GCP | $320/month | Similar to AWS, with sustained use discounts |
+| Azure | $340/month | Comparable to AWS, enterprise agreement discounts available |
+
+<Note>
+Costs are estimates for comparison. Actual costs depend on usage patterns, data transfer, reserved instances, and enterprise agreements.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="AWS Implementation" icon="aws" href="/multicloud/aws-implementation">
+    Learn about the AWS implementation
+  </Card>
+  <Card title="Migration Guide" icon="shuffle" href="/multicloud/migration-guide">
+    Step-by-step migration process
+  </Card>
+</CardGroup>

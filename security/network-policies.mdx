@@ -1,0 +1,633 @@
+---
+title: Network Policies
+description: Kubernetes NetworkPolicy configurations for zero-trust networking
+---
+
+## Zero Trust Networking
+
+The GovTech platform implements **Zero Trust Network Architecture** at the pod level using Kubernetes NetworkPolicies:
+
+<Warning>
+**Default Kubernetes Behavior:**
+
+By default, ALL pods in a Kubernetes cluster can communicate with each other without restriction. This is a significant security risk. If one pod is compromised, an attacker can pivot to any other pod in the cluster.
+
+**Our Approach:** Deny all traffic by default, then explicitly allow only necessary communication paths.
+</Warning>
+
+## Network Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Internet                              │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                  ┌─────▼──────┐
+                  │  AWS WAF   │ ← SQL injection, XSS blocking
+                  └─────┬──────┘
+                        │
+              ┌─────────▼──────────┐
+              │ Application Load   │
+              │ Balancer (ALB)     │
+              └─────────┬──────────┘
+                        │
+         ┌──────────────▼───────────────┐
+         │ Ingress Controller (Nginx)   │ ← kube-system namespace
+         │ Namespace: kube-system       │
+         └──────────────┬───────────────┘
+                        │
+         ┌──────────────▼───────────────┐
+         │     Frontend Pods            │
+         │   (React/Nginx:80)           │ ← govtech namespace
+         │   NetworkPolicy: frontend    │
+         └──────────────┬───────────────┘
+                        │
+                 Port 3000 (HTTP)
+                        │
+         ┌──────────────▼───────────────┐
+         │     Backend Pods             │
+         │   (Node.js:3000)             │ ← govtech namespace
+         │   NetworkPolicy: backend     │
+         └──────────┬───────────────────┘
+                    │                  └──────► Port 443 (HTTPS)
+             Port 5432 (PostgreSQL)             AWS APIs
+                    │                           (Secrets Manager, S3)
+         ┌──────────▼───────────────┐
+         │   Database Pods          │
+         │   (PostgreSQL:5432)      │ ← govtech namespace
+         │   NetworkPolicy: database│
+         │   NO egress allowed      │
+         └──────────────────────────┘
+```
+
+## Default Deny Policy
+
+The most important policy: **deny all traffic by default**.
+
+```yaml network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: govtech
+  labels:
+    app: govtech
+    security: network-policy
+spec:
+  podSelector: {}  # Applies to ALL pods in namespace
+  policyTypes:
+    - Ingress   # Block incoming traffic to all pods
+    - Egress    # Block outgoing traffic from all pods
+```
+
+<Note>
+This policy blocks **all** traffic to and from all pods in the `govtech` namespace. Subsequent policies create exceptions by explicitly allowing specific traffic.
+</Note>
+
+## Frontend Network Policy
+
+The frontend (React/Nginx) only receives traffic from the Ingress Controller and only communicates with the backend.
+
+```yaml network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-network-policy
+  namespace: govtech
+  labels:
+    app: govtech
+    component: frontend
+    security: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend  # Applies only to frontend pods
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow HTTP traffic from ALB (Ingress controller)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 80   # Nginx listens on port 80
+
+  egress:
+    # Frontend can call backend API
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 3000  # Backend Node.js port
+
+    # DNS resolution (required for service discovery)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
+
+### What This Allows
+
+<Tabs>
+  <Tab title="Ingress (Incoming)">
+    **Allowed:**
+    - HTTP requests from Ingress Controller on port 80
+    
+    **Denied:**
+    - Direct access from other pods
+    - Direct access from backend
+    - Any traffic from internet (must go through ALB)
+  </Tab>
+  
+  <Tab title="Egress (Outgoing)">
+    **Allowed:**
+    - HTTP requests to backend pods on port 3000
+    - DNS queries (UDP/TCP port 53)
+    
+    **Denied:**
+    - Direct database access
+    - Direct internet access
+    - Communication with other namespaces (except DNS)
+  </Tab>
+</Tabs>
+
+## Backend Network Policy
+
+The backend (Node.js) accepts traffic from frontend and Ingress Controller, and communicates with the database and AWS APIs.
+
+```yaml network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-network-policy
+  namespace: govtech
+  labels:
+    app: govtech
+    component: backend
+    security: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Receive requests from frontend
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 3000
+
+    # Receive direct API calls from Ingress Controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3000
+
+  egress:
+    # Connect to PostgreSQL database
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Call AWS APIs (Secrets Manager, S3) via NAT Gateway
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8      # Exclude private IPs
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443  # HTTPS only
+
+    # DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
+
+### What This Allows
+
+<Tabs>
+  <Tab title="Ingress (Incoming)">
+    **Allowed:**
+    - HTTP requests from frontend pods on port 3000
+    - HTTP requests from Ingress Controller on port 3000 (for `/api/*` direct routing)
+    
+    **Denied:**
+    - Direct access from database
+    - Direct access from internet
+    - Access from other namespaces
+  </Tab>
+  
+  <Tab title="Egress (Outgoing)">
+    **Allowed:**
+    - PostgreSQL connections to database pods on port 5432
+    - HTTPS (port 443) to AWS services (public IPs only)
+    - DNS queries
+    
+    **Denied:**
+    - HTTP (port 80) to internet (only HTTPS allowed)
+    - Connections to private IP ranges (except DNS)
+    - Direct communication with frontend
+  </Tab>
+</Tabs>
+
+<Warning>
+**AWS API Access:**
+
+The backend needs to access AWS Secrets Manager and potentially S3. This requires HTTPS (port 443) egress to public AWS endpoints. Traffic routes through the **NAT Gateway** in the VPC.
+
+Use **IRSA (IAM Roles for Service Accounts)** so pods don't need hardcoded AWS credentials.
+</Warning>
+
+## Database Network Policy
+
+The database is the most sensitive resource and has the strictest policy:
+- **Only receives** connections from backend
+- **Cannot initiate** any outbound connections (except DNS)
+
+```yaml network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-network-policy
+  namespace: govtech
+  labels:
+    app: govtech
+    component: database
+    security: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # ONLY backend can connect to PostgreSQL
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 5432
+
+  egress:
+    # Database needs DNS only
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+### What This Allows
+
+<Tabs>
+  <Tab title="Ingress (Incoming)">
+    **Allowed:**
+    - PostgreSQL connections from backend pods only on port 5432
+    
+    **Denied:**
+    - Everything else (frontend, Ingress Controller, other namespaces, internet)
+  </Tab>
+  
+  <Tab title="Egress (Outgoing)">
+    **Allowed:**
+    - DNS queries only (UDP port 53)
+    
+    **Denied:**
+    - All other outbound connections
+    - Cannot connect to internet
+    - Cannot initiate connections to other pods
+  </Tab>
+</Tabs>
+
+<Note>
+**Why No Egress for Database?**
+
+Databases should never initiate outbound connections. This prevents:
+- Data exfiltration if the database is compromised
+- Malware from calling command-and-control servers
+- Unauthorized backup/replication to external systems
+</Note>
+
+## Testing Network Policies
+
+### Deployment Verification
+
+```bash
+# Apply network policies
+kubectl apply -f kubernetes/network-policies.yaml
+
+# Verify all policies are created
+kubectl get networkpolicies -n govtech
+
+# Expected output:
+NAME                      POD-SELECTOR   AGE
+default-deny-all          <none>         1m
+frontend-network-policy   app=frontend   1m
+backend-network-policy    app=backend    1m
+database-network-policy   app=postgres   1m
+
+# Describe a policy to see details
+kubectl describe networkpolicy frontend-network-policy -n govtech
+```
+
+### Connectivity Tests
+
+<Steps>
+  <Step title="Test Frontend → Backend (Should Succeed)">
+    ```bash
+    # Get frontend pod name
+    FRONTEND_POD=$(kubectl get pods -n govtech -l app=frontend -o jsonpath='{.items[0].metadata.name}')
+
+    # Test connection to backend service
+    kubectl exec -it $FRONTEND_POD -n govtech -- curl -s http://backend-service:3000/health
+
+    # Expected: {"status":"healthy"}
+    ```
+  </Step>
+  
+  <Step title="Test Frontend → Database (Should Fail)">
+    ```bash
+    # Frontend should NOT be able to access database directly
+    kubectl exec -it $FRONTEND_POD -n govtech -- curl -s --connect-timeout 5 postgres-service:5432
+
+    # Expected: Connection timeout or connection refused
+    ```
+    
+    This should fail because the NetworkPolicy blocks frontend→database communication.
+  </Step>
+  
+  <Step title="Test Backend → Database (Should Succeed)">
+    ```bash
+    # Get backend pod name
+    BACKEND_POD=$(kubectl get pods -n govtech -l app=backend -o jsonpath='{.items[0].metadata.name}')
+
+    # Test PostgreSQL connection
+    kubectl exec -it $BACKEND_POD -n govtech -- psql -h postgres-service -U govtech_admin -d govtech -c "SELECT version();"
+
+    # Expected: PostgreSQL version information
+    ```
+  </Step>
+  
+  <Step title="Test Database → Internet (Should Fail)">
+    ```bash
+    # Database should NOT be able to reach internet
+    DB_POD=$(kubectl get pods -n govtech -l app=postgres -o jsonpath='{.items[0].metadata.name}')
+
+    kubectl exec -it $DB_POD -n govtech -- curl -s --connect-timeout 5 https://www.google.com
+
+    # Expected: Connection timeout
+    ```
+  </Step>
+</Steps>
+
+### Automated Test Script
+
+Use the provided test script:
+
+```bash
+# Run automated network policy tests
+./tests/security/test-network-policies.sh
+
+# Expected output:
+✓ Frontend can reach backend
+✗ Frontend cannot reach database (correct)
+✓ Backend can reach database
+✗ Database cannot reach internet (correct)
+✓ Backend can reach AWS APIs on port 443
+
+All tests passed!
+```
+
+## Common Issues and Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Pods Cannot Communicate After Applying Policies">
+    **Symptom:** Services that worked before now show connection timeouts.
+    
+    **Diagnosis:**
+    ```bash
+    # Check if NetworkPolicies exist
+    kubectl get networkpolicies -n govtech
+    
+    # Verify pod labels match policy selectors
+    kubectl get pods -n govtech --show-labels
+    ```
+    
+    **Common Causes:**
+    1. Pod labels don't match policy `podSelector`
+    2. Missing DNS egress rule (pods can't resolve service names)
+    3. Wrong port number in policy
+    
+    **Solution:**
+    ```bash
+    # Ensure pods have correct labels
+    kubectl label pod <pod-name> -n govtech app=backend --overwrite
+    
+    # Verify DNS egress is allowed
+    kubectl describe networkpolicy backend-network-policy -n govtech | grep -A5 "Egress"
+    ```
+  </Accordion>
+  
+  <Accordion title="Backend Cannot Access AWS APIs">
+    **Symptom:** Backend logs show connection timeouts when calling AWS Secrets Manager or S3.
+    
+    **Diagnosis:**
+    ```bash
+    # Check if HTTPS egress is allowed
+    kubectl exec -it <backend-pod> -n govtech -- curl -v https://secretsmanager.us-east-1.amazonaws.com
+    ```
+    
+    **Common Causes:**
+    1. Missing HTTPS (port 443) egress rule
+    2. NAT Gateway not configured in VPC
+    3. Security groups blocking outbound traffic
+    
+    **Solution:**
+    Verify the egress rule includes:
+    ```yaml
+    egress:
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+        ports:
+          - protocol: TCP
+            port: 443
+    ```
+  </Accordion>
+  
+  <Accordion title="DNS Resolution Fails">
+    **Symptom:** Pods can't resolve service names like `backend-service.govtech.svc.cluster.local`.
+    
+    **Diagnosis:**
+    ```bash
+    # Test DNS from pod
+    kubectl exec -it <pod-name> -n govtech -- nslookup backend-service
+    ```
+    
+    **Solution:**
+    Every pod needs DNS egress:
+    ```yaml
+    egress:
+      - to:
+          - namespaceSelector: {}
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+    ```
+  </Accordion>
+  
+  <Accordion title="NetworkPolicies Not Enforced">
+    **Symptom:** Policies exist but all pods can still communicate freely.
+    
+    **Cause:** The CNI (Container Network Interface) doesn't support NetworkPolicies.
+    
+    **Diagnosis:**
+    ```bash
+    # Check CNI plugin
+    kubectl get daemonset -n kube-system | grep -E 'calico|cilium|weave'
+    ```
+    
+    **Solution:**
+    AWS EKS uses the **VPC CNI plugin** which supports NetworkPolicies. Ensure you're using a compatible version:
+    ```bash
+    kubectl describe daemonset aws-node -n kube-system | grep Image
+    # Should show: amazon/amazon-k8s-cni (version 1.11+)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Namespace Isolation" icon="layer-group">
+    **Separate sensitive workloads into different namespaces:**
+    - `govtech-prod` for production
+    - `govtech-staging` for staging
+    - `govtech-dev` for development
+    
+    Each namespace gets its own set of NetworkPolicies.
+  </Card>
+  
+  <Card title="Label Consistency" icon="tags">
+    **Use consistent labels across all resources:**
+    - `app: backend` for backend pods
+    - `app: frontend` for frontend pods
+    - `app: postgres` for database pods
+    
+    Labels are the foundation of NetworkPolicy selectors.
+  </Card>
+  
+  <Card title="Monitor Denied Traffic" icon="shield-exclamation">
+    **Enable VPC Flow Logs to see blocked traffic:**
+    ```bash
+    aws ec2 create-flow-logs \
+      --resource-type VPC \
+      --resource-ids vpc-xxxxx \
+      --traffic-type REJECT
+    ```
+    
+    Review logs to ensure policies work as expected.
+  </Card>
+  
+  <Card title="Regular Policy Audits" icon="clipboard-check">
+    **Monthly review checklist:**
+    - [ ] Verify default-deny policy exists
+    - [ ] Check for overly permissive rules
+    - [ ] Test connectivity between pods
+    - [ ] Review VPC Flow Logs for denied traffic
+    - [ ] Validate labels match policy selectors
+  </Card>
+</CardGroup>
+
+## Advanced Patterns
+
+### Multi-Environment Isolation
+
+For production, use separate namespaces with strict isolation:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-namespace
+  namespace: govtech-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only allow traffic from same namespace
+    - from:
+        - podSelector: {}
+```
+
+### Egress Firewall for Allowed Domains
+
+Restrict backend to specific AWS services:
+
+```yaml
+egress:
+  # Allow only Secrets Manager in us-east-1
+  - to:
+      - ipBlock:
+          # IP range for secretsmanager.us-east-1.amazonaws.com
+          cidr: 52.46.128.0/19
+    ports:
+      - protocol: TCP
+        port: 443
+```
+
+<Note>
+Use `nslookup secretsmanager.us-east-1.amazonaws.com` to get the IP range. AWS service IPs can change, so use broad CIDR blocks or allow all AWS IPs.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Secrets Management" icon="key" href="/security/secrets-management">
+    Learn how to securely manage credentials without hardcoding
+  </Card>
+  <Card title="Compliance" icon="clipboard-check" href="/security/compliance">
+    Review audit procedures and compliance frameworks
+  </Card>
+</CardGroup>

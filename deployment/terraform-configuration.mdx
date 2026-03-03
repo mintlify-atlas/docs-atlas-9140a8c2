@@ -1,0 +1,457 @@
+---
+title: 'Terraform Configuration'
+description: 'Configure and deploy infrastructure using Terraform for the GovTech Multicloud Platform'
+---
+
+## Overview
+
+This guide covers the Terraform configuration and deployment process for creating the AWS infrastructure, including VPC, EKS cluster, RDS database, S3 storage, and security services.
+
+## Terraform Structure
+
+The Terraform configuration is organized into modules:
+
+- **Networking**: VPC, subnets, route tables, gateways, security groups
+- **Kubernetes Cluster**: EKS cluster, node groups, IAM roles
+- **Database**: RDS PostgreSQL with Multi-AZ support (prod only)
+- **Storage**: S3 buckets with encryption and versioning
+- **Security**: WAF, GuardDuty, KMS, CloudTrail, Security Hub
+
+## Backend Configuration
+
+Terraform state is stored in S3 for team collaboration:
+
+```hcl platform/terraform/main.tf
+terraform {
+  backend "s3" {
+    bucket  = "govtech-terraform-state-835960996869"
+    key     = "terraform.tfstate"
+    region  = "us-east-1"
+    encrypt = true
+  }
+}
+```
+
+<Note>
+  Replace the bucket name with your own S3 bucket created during [setup](/deployment/setup-guide#create-s3-bucket-for-terraform-state).
+</Note>
+
+## Provider Configuration
+
+The AWS provider is configured with default tags:
+
+```hcl platform/terraform/main.tf
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project     = "govtech"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
+```
+
+## Required Variables
+
+The following variables are required:
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `aws_region` | AWS region | `us-east-1` | No |
+| `environment` | Environment name | - | Yes |
+| `vpc_cidr` | VPC CIDR block | `10.0.0.0/16` | No |
+| `db_username` | Database username | `govtech_admin` | No |
+| `db_password` | Database password | - | Yes |
+
+<Warning>
+  The `db_password` variable is sensitive and must be provided via environment variable `TF_VAR_db_password` or a `.tfvars` file (never committed to Git).
+</Warning>
+
+## Deployment Steps
+
+### Development Environment
+
+<Steps>
+  <Step title="Navigate to Dev Environment">
+    ```bash
+    cd platform/terraform/environments/dev
+    ```
+  </Step>
+
+  <Step title="Initialize Terraform">
+    Initialize Terraform and download required providers:
+    ```bash
+    terraform init
+    ```
+    
+    Expected output:
+    ```
+    Initializing the backend...
+    Initializing modules...
+    Initializing provider plugins...
+    Terraform has been successfully initialized!
+    ```
+  </Step>
+
+  <Step title="Review Terraform Plan">
+    Generate and review the execution plan:
+    ```bash
+    terraform plan
+    ```
+    
+    This shows all resources that will be created. Review carefully before applying.
+  </Step>
+
+  <Step title="Set Database Password">
+    Set the database password as an environment variable:
+    ```bash
+    export TF_VAR_db_password="your-secure-password"
+    ```
+  </Step>
+
+  <Step title="Apply Terraform Configuration">
+    Apply the configuration to create infrastructure:
+    ```bash
+    terraform apply
+    ```
+    
+    Type `yes` when prompted to confirm.
+    
+    <Note>
+      Initial deployment takes 15-20 minutes. EKS cluster creation is the longest step.
+    </Note>
+  </Step>
+
+  <Step title="Save Terraform Outputs">
+    Save important outputs for later use:
+    ```bash
+    terraform output > terraform-outputs.txt
+    
+    # Get specific outputs
+    terraform output cluster_name
+    terraform output kubeconfig_command
+    ```
+  </Step>
+</Steps>
+
+### Production Environment
+
+<Warning>
+  Production deployment requires additional approval and uses different instance sizes and Multi-AZ configuration.
+</Warning>
+
+<Steps>
+  <Step title="Navigate to Production Environment">
+    ```bash
+    cd platform/terraform/environments/prod
+    ```
+  </Step>
+
+  <Step title="Review Production Configuration">
+    Production uses:
+    - **EKS**: t3.medium nodes, min 3 nodes (1 per AZ)
+    - **RDS**: db.t3.small, Multi-AZ enabled, 30-day backups
+    - **Network**: 3 availability zones for high availability
+    - **VPC CIDR**: 10.2.0.0/16 (separate from dev/staging)
+  </Step>
+
+  <Step title="Initialize and Plan">
+    ```bash
+    terraform init
+    export TF_VAR_db_password="prod-secure-password"
+    terraform plan -out=prod.tfplan
+    ```
+    
+    Save the plan for audit purposes.
+  </Step>
+
+  <Step title="Apply with Approval">
+    ```bash
+    terraform apply prod.tfplan
+    ```
+    
+    Production deployment takes 20-30 minutes due to Multi-AZ RDS.
+  </Step>
+</Steps>
+
+## Module Details
+
+### Networking Module
+
+Creates VPC with public and private subnets across multiple availability zones:
+
+```hcl platform/terraform/main.tf
+module "networking" {
+  source = "./modules/networking"
+
+  project_name         = local.project_name
+  environment          = var.environment
+  vpc_cidr             = var.vpc_cidr
+  availability_zones   = local.availability_zones
+  public_subnet_cidrs  = local.public_subnet_cidrs
+  private_subnet_cidrs = local.private_subnet_cidrs
+}
+```
+
+**Resources Created:**
+- VPC with DNS enabled
+- Public subnets (for ALB)
+- Private subnets (for EKS nodes and RDS)
+- Internet Gateway
+- NAT Gateways (1 per AZ)
+- Route tables
+- Security groups for EKS, RDS, and ALB
+
+### Kubernetes Module
+
+Creates EKS cluster with managed node groups:
+
+```hcl platform/terraform/main.tf
+module "kubernetes" {
+  source = "./modules/kubernetes-cluster"
+
+  project_name       = local.project_name
+  environment        = var.environment
+  cluster_name       = "${local.project_name}-${var.environment}"
+  vpc_id             = module.networking.vpc_id
+  subnet_ids         = module.networking.private_subnet_ids
+  node_instance_type = local.node_instance_type
+  node_min_size      = local.node_min
+  node_max_size      = local.node_max
+  node_desired_size  = local.node_desired
+}
+```
+
+**Instance Types by Environment:**
+- **Dev**: t3.medium (2 vCPUs, 4GB RAM) - 2 nodes
+- **Staging**: t3.small (2 vCPUs, 2GB RAM) - 3 nodes
+- **Prod**: t3.medium (2 vCPUs, 4GB RAM) - 3-10 nodes
+
+### Database Module
+
+Creates RDS PostgreSQL instance:
+
+```hcl platform/terraform/main.tf
+module "database" {
+  source = "./modules/database"
+
+  project_name      = local.project_name
+  environment       = var.environment
+  subnet_ids        = module.networking.private_subnet_ids
+  security_group_id = module.networking.rds_security_group_id
+  db_username       = var.db_username
+  db_password       = var.db_password
+  multi_az          = var.environment == "prod" ? true : false
+}
+```
+
+**Configuration by Environment:**
+
+| Environment | Instance Class | Storage | Multi-AZ | Backup Retention |
+|-------------|---------------|---------|----------|------------------|
+| Dev | db.t3.micro | 20GB | No | 3 days |
+| Staging | db.t3.small | 30GB | No | 7 days |
+| Prod | db.t3.small | 50GB | Yes | 30 days |
+
+### Security Module
+
+Creates security services:
+
+```hcl platform/terraform/main.tf
+module "security" {
+  source = "./modules/security"
+
+  project_name = local.project_name
+  environment  = var.environment
+  account_id   = local.account_id
+  aws_region   = var.aws_region
+  logs_bucket  = module.storage.bucket_id
+}
+```
+
+**Resources Created:**
+- **WAF**: Web Application Firewall for ALB protection
+- **GuardDuty**: Threat detection
+- **KMS**: Encryption keys for data at rest
+- **CloudTrail**: API audit logging
+- **Security Hub**: Centralized security findings
+
+## ECR Repositories
+
+Terraform creates ECR repositories for Docker images:
+
+```hcl platform/terraform/main.tf
+resource "aws_ecr_repository" "backend" {
+  name                 = "govtech-backend"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+    kms_key         = module.security.kms_key_arn
+  }
+}
+```
+
+**ECR Features:**
+- Vulnerability scanning on every push
+- KMS encryption
+- Lifecycle policy (keeps last 10 tagged images, removes untagged after 7 days)
+
+## Important Outputs
+
+After deployment, Terraform provides these outputs:
+
+```bash
+# VPC and Networking
+terraform output vpc_id
+
+# EKS Cluster
+terraform output eks_cluster_name
+terraform output eks_cluster_endpoint
+
+# Database (sensitive)
+terraform output rds_endpoint
+
+# ECR Repositories
+terraform output ecr_backend_url
+terraform output ecr_frontend_url
+
+# GitHub Actions CI/CD
+terraform output github_actions_role_arn
+
+# WAF
+terraform output waf_arn
+```
+
+## Connecting to EKS Cluster
+
+After Terraform completes, configure kubectl:
+
+```bash
+# Get kubeconfig command from Terraform output
+terraform output kubeconfig_command
+
+# Or run directly
+aws eks update-kubeconfig --name govtech-dev --region us-east-1
+
+# Verify connection
+kubectl cluster-info
+kubectl get nodes
+```
+
+## Terraform State Management
+
+### Viewing State
+
+```bash
+# List all resources in state
+terraform state list
+
+# Show specific resource
+terraform state show module.networking.aws_vpc.main
+```
+
+### Importing Existing Resources
+
+```bash
+# Import existing S3 bucket
+terraform import module.storage.aws_s3_bucket.app_storage govtech-dev-app-storage-835960996869
+```
+
+### Refreshing State
+
+```bash
+# Sync state with real infrastructure
+terraform refresh
+```
+
+## Updating Infrastructure
+
+To update existing infrastructure:
+
+<Steps>
+  <Step title="Modify Configuration">
+    Edit the relevant `.tf` files with your changes.
+  </Step>
+
+  <Step title="Plan Changes">
+    ```bash
+    terraform plan
+    ```
+    Review what will be changed, added, or destroyed.
+  </Step>
+
+  <Step title="Apply Changes">
+    ```bash
+    terraform apply
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Some changes may require resource replacement (destroy then create). Review the plan carefully before applying.
+</Warning>
+
+## Destroying Infrastructure
+
+To destroy all infrastructure (use with caution):
+
+```bash
+cd platform/terraform/environments/dev
+terraform destroy
+```
+
+<Warning>
+  This will delete ALL resources including databases, S3 buckets (if not protected), and the EKS cluster. Ensure you have backups before proceeding.
+</Warning>
+
+## Troubleshooting
+
+### Terraform Init Fails
+
+```bash
+# Clear cached plugins and modules
+rm -rf .terraform
+terraform init
+```
+
+### State Lock Issues
+
+If state is locked by another process:
+
+```bash
+# Force unlock (use with caution)
+terraform force-unlock <LOCK_ID>
+```
+
+### Provider Version Conflicts
+
+```bash
+# Update providers to latest compatible versions
+terraform init -upgrade
+```
+
+### EKS Cluster Creation Timeout
+
+EKS creation can take 15-20 minutes. If it times out:
+
+```bash
+# Check cluster status in AWS Console
+aws eks describe-cluster --name govtech-dev --region us-east-1
+
+# Continue waiting for completion
+terraform apply
+```
+
+## Next Steps
+
+1. [Deploy applications to Kubernetes](/deployment/kubernetes-deployment)
+2. [Understand environment configurations](/deployment/environments)
+3. [Set up rollback procedures](/deployment/rollback-procedures)

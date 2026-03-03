@@ -1,0 +1,529 @@
+---
+title: Security Module
+description: KMS encryption, CloudTrail auditing, GuardDuty threat detection, Security Hub, WAF protection, and Secrets Manager
+---
+
+The security module implements comprehensive security controls including encryption key management, audit logging, threat detection, compliance monitoring, web application firewall, cost anomaly detection, and secrets management.
+
+## Overview
+
+This module implements five layers of security:
+
+1. **KMS (Key Management Service)** - Centralized encryption key management
+2. **CloudTrail** - Complete audit log of all AWS account actions
+3. **GuardDuty** - Intelligent threat detection and intrusion detection
+4. **Security Hub** - Unified security posture and compliance dashboard
+5. **WAF (Web Application Firewall)** - HTTP-level attack protection
+
+Additionally includes:
+- **Secrets Manager** - Secure credential storage
+- **Cost Anomaly Detection** - Alerts on unexpected spending
+
+## Resources Created
+
+### KMS Key
+- **Resource**: `aws_kms_key.govtech_main`
+- Master encryption key for all sensitive data
+- Automatic annual key rotation
+- 30-day deletion window for recovery
+- Used by: RDS, S3, CloudTrail logs, Secrets Manager
+
+### CloudTrail
+- **Resource**: `aws_cloudtrail.govtech_audit`
+- Records all API calls and actions in AWS account
+- Multi-region trail capturing global events
+- S3 data events enabled (who accessed which files)
+- Log file validation for integrity
+- Logs encrypted with KMS
+- Streamed to CloudWatch Logs for real-time analysis
+
+### GuardDuty
+- **Resource**: `aws_guardduty_detector.main`
+- Analyzes VPC Flow Logs, CloudTrail, DNS logs, S3 events
+- Kubernetes audit log analysis
+- Malware scanning for EC2/EKS volumes
+- Detects: compromised instances, data exfiltration, cryptocurrency mining, C2 communication
+
+### Security Hub
+- **Resource**: `aws_securityhub_account.main`
+- Aggregates findings from GuardDuty, Inspector, IAM Access Analyzer, Macie
+- Compliance checks against:
+  - CIS AWS Foundations Benchmark v1.4.0
+  - AWS Foundational Security Best Practices
+- Multi-region finding aggregation
+
+### WAF Web ACL
+- **Resource**: `aws_wafv2_web_acl.govtech`
+- Filters HTTP/HTTPS traffic before reaching application
+- AWS Managed Rules:
+  - **AmazonIpReputationList**: Blocks known malicious IPs
+  - **CommonRuleSet**: OWASP Top 10 protection (XSS, path traversal, etc.)
+  - **SQLiRuleSet**: SQL injection prevention
+  - **KnownBadInputsRuleSet**: Log4Shell, SSRF, and other exploit attempts
+- Custom rate limiting: 2,000 requests per 5 minutes per IP
+
+### Secrets Manager
+- **Resources**: 
+  - `aws_secretsmanager_secret.db_credentials` - Database credentials
+  - `aws_secretsmanager_secret.jwt_secret` - JWT signing key
+- Encrypted with KMS
+- 7-day recovery window for deleted secrets
+- Access logged in CloudTrail
+
+### Cost Anomaly Detection
+- **Resource**: `aws_ce_anomaly_monitor.govtech`
+- Machine learning-based spending analysis
+- Alerts on anomalies > $50
+- Detects: unauthorized resource creation, misconfigured auto-scaling, crypto mining
+
+### CloudWatch Alarms
+- **Root account usage** - Alerts when AWS root account is used
+- **Unauthorized API calls** - 5+ failed API calls in 5 minutes
+
+## Variables
+
+<ParamField path="project_name" type="string" required>
+  Project name for resource naming and tagging
+</ParamField>
+
+<ParamField path="environment" type="string" required>
+  Deployment environment: `dev`, `staging`, or `prod`
+  
+  Affects:
+  - CloudTrail log retention (365 days for prod, 90 for non-prod)
+</ParamField>
+
+<ParamField path="account_id" type="string" required>
+  AWS account ID for KMS key policy.
+  
+  Obtain with: `aws sts get-caller-identity --query Account --output text`
+</ParamField>
+
+<ParamField path="aws_region" type="string" required>
+  AWS region for Security Hub standards ARNs
+</ParamField>
+
+<ParamField path="logs_bucket" type="string" required>
+  S3 bucket ID for storing CloudTrail and WAF logs.
+  
+  Must be created before this module with appropriate bucket policy allowing CloudTrail writes.
+</ParamField>
+
+## Outputs
+
+<ParamField path="kms_key_id" type="string">
+  KMS key ID (UUID format)
+</ParamField>
+
+<ParamField path="kms_key_arn" type="string">
+  KMS key ARN for use in RDS, S3, and Secrets Manager encryption configurations
+</ParamField>
+
+<ParamField path="guardduty_detector_id" type="string">
+  GuardDuty detector ID for managing findings and suppressions
+</ParamField>
+
+<ParamField path="waf_web_acl_arn" type="string">
+  WAF Web ACL ARN to associate with Application Load Balancer
+</ParamField>
+
+<ParamField path="cloudtrail_arn" type="string">
+  CloudTrail trail ARN
+</ParamField>
+
+<ParamField path="db_secret_arn" type="string">
+  ARN of database credentials secret in Secrets Manager
+</ParamField>
+
+<ParamField path="jwt_secret_arn" type="string">
+  ARN of JWT secret in Secrets Manager
+</ParamField>
+
+<ParamField path="cost_monitor_arn" type="string">
+  ARN of cost anomaly monitor
+</ParamField>
+
+## Usage Example
+
+```hcl
+# Create logs bucket first
+resource "aws_s3_bucket" "logs" {
+  bucket = "govtech-prod-logs-123456789012"
+}
+
+resource "aws_s3_bucket_policy" "cloudtrail_logs" {
+  bucket = aws_s3_bucket.logs.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "AWSCloudTrailAclCheck"
+      Effect = "Allow"
+      Principal = {
+        Service = "cloudtrail.amazonaws.com"
+      }
+      Action   = "s3:GetBucketAcl"
+      Resource = aws_s3_bucket.logs.arn
+    }, {
+      Sid    = "AWSCloudTrailWrite"
+      Effect = "Allow"
+      Principal = {
+        Service = "cloudtrail.amazonaws.com"
+      }
+      Action   = "s3:PutObject"
+      Resource = "${aws_s3_bucket.logs.arn}/*"
+      Condition = {
+        StringEquals = {
+          "s3:x-amz-acl" = "bucket-owner-full-control"
+        }
+      }
+    }]
+  })
+}
+
+data "aws_caller_identity" "current" {}
+
+module "security" {
+  source = "./modules/security"
+
+  project_name = "govtech"
+  environment  = "prod"
+  account_id   = data.aws_caller_identity.current.account_id
+  aws_region   = "us-east-1"
+  logs_bucket  = aws_s3_bucket.logs.id
+}
+
+# Use KMS key for RDS encryption
+module "database" {
+  source = "./modules/database"
+  # ...
+  kms_key_arn = module.security.kms_key_arn
+}
+```
+
+## CloudTrail Log Analysis
+
+### Query Logs in CloudWatch Insights
+
+Find who created a specific resource:
+
+```sql
+fields @timestamp, userIdentity.principalId, eventName, requestParameters
+| filter eventName = "RunInstances"
+| sort @timestamp desc
+| limit 20
+```
+
+Find all actions by a specific user:
+
+```sql
+fields @timestamp, eventName, sourceIPAddress, errorCode
+| filter userIdentity.principalId = "AIDAI23ABC123EXAMPLE"
+| sort @timestamp desc
+```
+
+Detect unauthorized access attempts:
+
+```sql
+fields @timestamp, eventName, sourceIPAddress, userIdentity.principalId
+| filter errorCode = "AccessDenied" or errorCode = "UnauthorizedOperation"
+| stats count() by sourceIPAddress
+| sort count desc
+```
+
+### S3 Data Events
+
+CloudTrail records who accessed which S3 objects:
+
+```sql
+fields @timestamp, userIdentity.principalId, requestParameters.bucketName, requestParameters.key
+| filter eventName = "GetObject" or eventName = "PutObject"
+| filter requestParameters.bucketName = "govtech-prod-app-storage-123456789012"
+```
+
+## GuardDuty Response
+
+### Common Findings
+
+| Finding Type | Severity | Description | Action |
+|--------------|----------|-------------|--------|
+| UnauthorizedAccess:EC2/SSHBruteForce | Medium | SSH brute force attempt | Block source IP in security group |
+| Trojan:EC2/BlackholeTraffic | High | EC2 communicating with known botnet | Isolate instance, investigate |
+| Recon:EC2/PortProbeUnprotectedPort | Low | Port scanning detected | Review security groups |
+| Exfiltration:S3/AnomalousBehavior | High | Unusual S3 data download | Review IAM credentials, rotate keys |
+| CryptoCurrency:EC2/BitcoinTool | High | Bitcoin mining detected | Terminate instance, investigate compromise |
+
+### Automated Response
+
+Create EventBridge rule to respond to findings:
+
+```hcl
+resource "aws_cloudwatch_event_rule" "guardduty_high" {
+  name        = "guardduty-high-severity"
+  description = "Trigger on high severity GuardDuty findings"
+
+  event_pattern = jsonencode({
+    source      = ["aws.guardduty"]
+    detail-type = ["GuardDuty Finding"]
+    detail = {
+      severity = [{ numeric: [">", 7] }]  # High and Critical
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "sns" {
+  rule      = aws_cloudwatch_event_rule.guardduty_high.name
+  target_id = "SendToSNS"
+  arn       = aws_sns_topic.security_alerts.arn
+}
+```
+
+## Security Hub Dashboard
+
+### Compliance Standards
+
+Review compliance posture in Security Hub console:
+
+1. **CIS AWS Foundations Benchmark v1.4.0**
+   - IAM best practices
+   - Logging and monitoring
+   - Networking configuration
+
+2. **AWS Foundational Security Best Practices**
+   - S3 bucket permissions
+   - EC2 security groups
+   - RDS encryption and backups
+
+### Failed Controls
+
+Common findings and remediation:
+
+| Control | Issue | Remediation |
+|---------|-------|-------------|
+| IAM.1 | Root account has access keys | Delete root access keys |
+| EC2.2 | Security group allows 0.0.0.0/0 on port 22 | Restrict SSH to specific IPs |
+| S3.1 | S3 bucket lacks encryption | Enable default encryption |
+| RDS.3 | RDS instance not encrypted | Recreate with encryption enabled |
+| CloudTrail.1 | CloudTrail not enabled | Enable via security module |
+
+## WAF Configuration
+
+### Associate with Load Balancer
+
+After ALB creation:
+
+```bash
+ALB_ARN=$(kubectl get ingress -n govtech app-ingress \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' | \
+  xargs -I {} aws elbv2 describe-load-balancers \
+    --query "LoadBalancers[?DNSName=='{}'].LoadBalancerArn" \
+    --output text)
+
+aws wafv2 associate-web-acl \
+  --web-acl-arn $(terraform output -raw waf_web_acl_arn) \
+  --resource-arn $ALB_ARN \
+  --region us-east-1
+```
+
+Or via Terraform:
+
+```hcl
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = data.kubernetes_ingress.app.status[0].load_balancer[0].ingress[0].hostname
+  web_acl_arn  = module.security.waf_web_acl_arn
+}
+```
+
+### WAF Monitoring
+
+View blocked requests in CloudWatch:
+
+```bash
+aws wafv2 get-sampled-requests \
+  --web-acl-arn $(terraform output -raw waf_web_acl_arn) \
+  --rule-metric-name RateLimitRule \
+  --scope REGIONAL \
+  --time-window StartTime=2024-03-01T00:00:00Z,EndTime=2024-03-01T23:59:59Z \
+  --max-items 100
+```
+
+### Custom WAF Rules
+
+Block specific countries (geo-blocking):
+
+```hcl
+rule {
+  name     = "BlockCountries"
+  priority = 0
+
+  action {
+    block {}
+  }
+
+  statement {
+    geo_match_statement {
+      country_codes = ["CN", "RU", "KP"]  # China, Russia, North Korea
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "BlockCountries"
+    sampled_requests_enabled   = true
+  }
+}
+```
+
+## Secrets Manager Integration
+
+### Update Database Credentials
+
+After RDS creation:
+
+```bash
+DB_HOST=$(terraform output -raw db_instance_address)
+
+aws secretsmanager put-secret-value \
+  --secret-id govtech/prod/db-credentials \
+  --secret-string "{
+    \"username\": \"govtech_admin\",
+    \"password\": \"$(openssl rand -base64 32)\",
+    \"host\": \"$DB_HOST\",
+    \"port\": \"5432\",
+    \"dbname\": \"govtech\"
+  }"
+```
+
+### Access from Kubernetes
+
+Using External Secrets Operator:
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: aws-secretsmanager
+  namespace: govtech
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: backend
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: database-credentials
+  namespace: govtech
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: SecretStore
+  target:
+    name: database-credentials
+    creationPolicy: Owner
+  data:
+  - secretKey: username
+    remoteRef:
+      key: govtech/prod/db-credentials
+      property: username
+  - secretKey: password
+    remoteRef:
+      key: govtech/prod/db-credentials
+      property: password
+  - secretKey: host
+    remoteRef:
+      key: govtech/prod/db-credentials
+      property: host
+```
+
+## Cost Anomaly Alerts
+
+### Alert Destinations
+
+Update email address in module:
+
+```hcl
+subscriber {
+  type    = "EMAIL"
+  address = "devops@govtech.example.com"
+}
+
+# Add SNS topic for Slack/PagerDuty integration
+subscriber {
+  type    = "SNS"
+  address = aws_sns_topic.cost_alerts.arn
+}
+```
+
+### Common Anomalies
+
+- NAT Gateway data transfer spike (data exfiltration?)
+- EC2 instance type change (unauthorized scaling?)
+- S3 request surge (DDoS or scraping?)
+- RDS storage rapid growth (application bug?)
+
+## Compliance and Auditing
+
+### FISMA/FedRAMP Requirements
+
+This module addresses several FISMA controls:
+
+- **AC-2**: CloudTrail logs all account activity
+- **AU-2**: Comprehensive audit logging
+- **SC-13**: FIPS-validated encryption (KMS)
+- **SI-4**: GuardDuty provides intrusion detection
+- **SC-7**: WAF provides boundary protection
+
+### Audit Report Generation
+
+Export Security Hub findings:
+
+```bash
+aws securityhub get-findings \
+  --filters '{"ComplianceStatus": [{"Value": "FAILED", "Comparison": "EQUALS"}]}' \
+  --max-items 100 > security-findings.json
+```
+
+Export CloudTrail logs for date range:
+
+```bash
+aws cloudtrail lookup-events \
+  --start-time 2024-03-01T00:00:00Z \
+  --end-time 2024-03-31T23:59:59Z \
+  --max-results 1000 > audit-log-march-2024.json
+```
+
+## Best Practices
+
+### Enable MFA Delete on Logs Bucket
+
+Prevent log deletion even with root access:
+
+```bash
+aws s3api put-bucket-versioning \
+  --bucket govtech-prod-logs-123456789012 \
+  --versioning-configuration Status=Enabled,MFADelete=Enabled \
+  --mfa "arn:aws:iam::123456789012:mfa/root-account-mfa-device 123456"
+```
+
+### Regular Security Reviews
+
+- Weekly: Review GuardDuty findings
+- Monthly: Security Hub compliance posture
+- Quarterly: CloudTrail log analysis for anomalies
+- Annually: Penetration testing and architecture review
+
+### Incident Response Plan
+
+1. **Detection**: GuardDuty/Security Hub alert
+2. **Containment**: Isolate affected resources (security group changes)
+3. **Investigation**: Analyze CloudTrail logs, VPC Flow Logs
+4. **Eradication**: Rotate credentials, patch vulnerabilities
+5. **Recovery**: Restore from known-good backups
+6. **Lessons Learned**: Update security controls, document incident

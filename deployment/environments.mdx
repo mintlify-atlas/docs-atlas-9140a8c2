@@ -1,0 +1,505 @@
+---
+title: 'Environment Configurations'
+description: 'Development, staging, and production environment configurations for GovTech Platform'
+---
+
+## Overview
+
+The GovTech Multicloud Platform uses three distinct environments with different configurations optimized for their purpose:
+
+- **Development (dev)**: Fast iteration, minimal cost
+- **Staging**: Production-like testing environment
+- **Production (prod)**: High availability, maximum security
+
+## Environment Comparison
+
+### Infrastructure Sizing
+
+| Component | Development | Staging | Production |
+|-----------|-------------|---------|------------|
+| **VPC CIDR** | 10.0.0.0/16 | 10.1.0.0/16 | 10.2.0.0/16 |
+| **Availability Zones** | 2 | 3 | 3 |
+| **EKS Instance Type** | t3.medium | t3.small | t3.medium |
+| **EKS Min Nodes** | 2 | 2 | 3 |
+| **EKS Max Nodes** | 4 | 6 | 10 |
+| **RDS Instance** | db.t3.micro | db.t3.small | db.t3.small |
+| **RDS Storage** | 20GB | 30GB | 50GB |
+| **RDS Multi-AZ** | No | No | Yes |
+| **Backup Retention** | 3 days | 7 days | 30 days |
+
+### Cost Estimates
+
+| Environment | Monthly Cost (USD) | Primary Costs |
+|-------------|-------------------|---------------|
+| Development | ~$150-200 | EKS nodes, RDS single-AZ |
+| Staging | ~$250-350 | Larger cluster, 3 AZs |
+| Production | ~$500-700 | Multi-AZ RDS, more nodes, higher backup retention |
+
+<Note>
+  Costs are estimates and vary based on usage, data transfer, and AWS pricing changes. Use AWS Cost Explorer for accurate tracking.
+</Note>
+
+## Development Environment
+
+### Purpose
+
+- Rapid development and testing
+- Individual developer workspaces
+- Cost optimization over availability
+
+### Configuration
+
+```hcl terraform/environments/dev/main.tf
+module "networking" {
+  source = "../../modules/networking"
+
+  environment = "dev"
+  region      = "us-east-1"
+  vpc_cidr    = "10.0.0.0/16"
+
+  availability_zones   = ["us-east-1a", "us-east-1b"]
+  public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+  private_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
+}
+
+module "eks" {
+  source = "../../modules/kubernetes-cluster"
+
+  cluster_name       = "govtech-dev"
+  node_instance_type = "t3.medium"  # 2 vCPUs, 4GB RAM
+  node_min_size      = 2
+  node_max_size      = 4
+  node_desired_size  = 2
+}
+
+module "database" {
+  source = "../../modules/database"
+
+  db_instance_class     = "db.t3.micro"
+  db_allocated_storage  = 20
+  multi_az              = false  # Single AZ for cost savings
+  backup_retention_days = 3
+}
+```
+
+### Deployment
+
+```bash
+cd platform/terraform/environments/dev
+export TF_VAR_db_password="dev-password"
+terraform init
+terraform apply
+
+# Connect to cluster
+aws eks update-kubeconfig --name govtech-dev --region us-east-1
+
+# Deploy applications
+cd ../../../kubernetes
+./deploy.sh dev
+```
+
+### Access
+
+```bash
+# Get ALB URL
+kubectl get ingress govtech-ingress -n govtech -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+# Test locally (if using localhost CORS)
+curl http://localhost:5173  # Frontend dev server
+curl http://localhost:3000/api/health  # Backend dev server
+```
+
+## Staging Environment
+
+### Purpose
+
+- Pre-production testing
+- QA and integration testing
+- Performance testing
+- Production parity (3 AZs like prod)
+
+### Configuration
+
+```hcl terraform/environments/staging/main.tf
+module "networking" {
+  source = "../../modules/networking"
+
+  environment  = "staging"
+  vpc_cidr     = "10.1.0.0/16"  # Different CIDR from dev
+
+  # 3 AZs like production
+  availability_zones   = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  public_subnet_cidrs  = ["10.1.1.0/24", "10.1.2.0/24", "10.1.3.0/24"]
+  private_subnet_cidrs = ["10.1.10.0/24", "10.1.11.0/24", "10.1.12.0/24"]
+}
+
+module "eks" {
+  source = "../../modules/kubernetes-cluster"
+
+  cluster_name       = "govtech-staging"
+  node_instance_type = "t3.small"  # 2 vCPUs, 2GB RAM
+  node_min_size      = 2
+  node_max_size      = 6
+  node_desired_size  = 3
+}
+
+module "database" {
+  source = "../../modules/database"
+
+  db_instance_class     = "db.t3.small"
+  db_allocated_storage  = 30
+  multi_az              = false  # Cost optimization
+  backup_retention_days = 7
+}
+```
+
+### Deployment
+
+```bash
+cd platform/terraform/environments/staging
+export TF_VAR_db_password="staging-secure-password"
+terraform init
+terraform apply
+
+# Connect to cluster
+aws eks update-kubeconfig --name govtech-staging --region us-east-1
+
+# Deploy applications
+cd ../../../kubernetes
+./deploy.sh staging
+```
+
+### Use Cases
+
+- **QA Testing**: Test new features before production
+- **Integration Testing**: Test with production-like data
+- **Load Testing**: Simulate production traffic
+- **Disaster Recovery Drills**: Practice recovery procedures
+
+## Production Environment
+
+### Purpose
+
+- Live user traffic
+- Maximum availability and reliability
+- Enhanced security and compliance
+- Multi-AZ for fault tolerance
+
+### Configuration
+
+```hcl terraform/environments/prod/main.tf
+module "networking" {
+  source = "../../modules/networking"
+
+  environment  = "prod"
+  vpc_cidr     = "10.2.0.0/16"  # Separate CIDR space
+
+  # 3 AZs for high availability
+  availability_zones   = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  public_subnet_cidrs  = ["10.2.1.0/24", "10.2.2.0/24", "10.2.3.0/24"]
+  private_subnet_cidrs = ["10.2.10.0/24", "10.2.11.0/24", "10.2.12.0/24"]
+}
+
+module "eks" {
+  source = "../../modules/kubernetes-cluster"
+
+  cluster_name       = "govtech-prod"
+  node_instance_type = "t3.medium"  # 2 vCPUs, 4GB RAM
+  node_min_size      = 3   # Min 1 node per AZ
+  node_max_size      = 10  # Auto-scale to 10 nodes
+  node_desired_size  = 3
+}
+
+module "database" {
+  source = "../../modules/database"
+
+  db_instance_class     = "db.t3.small"
+  db_allocated_storage  = 50
+  multi_az              = true  # High availability
+  backup_retention_days = 30   # 30 days for compliance
+}
+```
+
+### Deployment
+
+<Warning>
+  Production deployment requires confirmation and approval.
+</Warning>
+
+```bash
+cd platform/terraform/environments/prod
+export TF_VAR_db_password="$(aws secretsmanager get-secret-value --secret-id govtech-prod-db-password --query SecretString --output text)"
+terraform init
+terraform plan -out=prod.tfplan
+
+# Review plan carefully
+terraform apply prod.tfplan
+
+# Connect to cluster
+aws eks update-kubeconfig --name govtech-prod --region us-east-1
+
+# Deploy applications (requires confirmation)
+cd ../../../kubernetes
+./deploy.sh prod
+# Type: PRODUCCION
+```
+
+### Production Features
+
+#### Multi-AZ RDS
+
+```hcl
+multi_az = true  # Automatic failover to standby in another AZ
+```
+
+**Benefits:**
+- Automatic failover in 1-2 minutes
+- No data loss during failover
+- Synchronous replication to standby
+
+#### Enhanced Backups
+
+```hcl
+backup_retention_days = 30  # 30 days for compliance
+```
+
+**Backup Schedule:**
+- Automated daily backups
+- Point-in-time recovery
+- Stored in S3 with encryption
+
+#### Auto Scaling
+
+```hcl
+node_min_size = 3   # Always 3 nodes minimum
+node_max_size = 10  # Scale to 10 during high load
+```
+
+**Scaling Triggers:**
+- CPU utilization > 70%
+- Memory utilization > 80%
+- Custom CloudWatch metrics
+
+## Environment-Specific Variables
+
+### Terraform Variables
+
+Each environment has its own `terraform.tfvars` file:
+
+```hcl
+# dev.tfvars
+environment = "dev"
+vpc_cidr    = "10.0.0.0/16"
+
+# staging.tfvars
+environment = "staging"
+vpc_cidr    = "10.1.0.0/16"
+
+# prod.tfvars
+environment = "prod"
+vpc_cidr    = "10.2.0.0/16"
+```
+
+### Kubernetes ConfigMaps
+
+Environment-specific configurations:
+
+```yaml
+# dev ConfigMap
+data:
+  NODE_ENV: "development"
+  LOG_LEVEL: "debug"
+  ENABLE_DEBUG_MODE: "true"
+
+# staging ConfigMap
+data:
+  NODE_ENV: "staging"
+  LOG_LEVEL: "info"
+  ENABLE_DEBUG_MODE: "false"
+
+# prod ConfigMap
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "warn"
+  ENABLE_DEBUG_MODE: "false"
+```
+
+## Switching Between Environments
+
+### Change kubectl Context
+
+```bash
+# List contexts
+kubectl config get-contexts
+
+# Switch to dev
+aws eks update-kubeconfig --name govtech-dev --region us-east-1
+
+# Switch to staging
+aws eks update-kubeconfig --name govtech-staging --region us-east-1
+
+# Switch to prod
+aws eks update-kubeconfig --name govtech-prod --region us-east-1
+
+# Verify current context
+kubectl config current-context
+```
+
+### Terraform Workspace
+
+```bash
+# Using separate directories (recommended)
+cd platform/terraform/environments/dev
+cd platform/terraform/environments/staging
+cd platform/terraform/environments/prod
+
+# Each has its own state file in S3:
+# s3://govtech-terraform-state-XXX/dev/terraform.tfstate
+# s3://govtech-terraform-state-XXX/staging/terraform.tfstate
+# s3://govtech-terraform-state-XXX/prod/terraform.tfstate
+```
+
+## Security Differences
+
+### Development
+
+- Relaxed CORS policies (localhost allowed)
+- Debug logging enabled
+- Single AZ (no failover)
+- Shorter backup retention
+
+### Staging
+
+- Production-like CORS policies
+- Info-level logging
+- 3 AZs (no Multi-AZ RDS)
+- Moderate backup retention
+
+### Production
+
+- Strict CORS policies (whitelist only)
+- Warn/error logging only
+- 3 AZs + Multi-AZ RDS
+- Extended backup retention (30 days)
+- WAF rules enabled
+- GuardDuty monitoring
+- CloudTrail audit logging
+
+## Promotion Workflow
+
+### Dev → Staging → Production
+
+<Steps>
+  <Step title="Test in Development">
+    ```bash
+    # Deploy to dev
+    ./deploy.sh dev
+    
+    # Run tests
+    npm test
+    
+    # Manual testing
+    ```
+  </Step>
+
+  <Step title="Deploy to Staging">
+    ```bash
+    # Deploy to staging
+    ./deploy.sh staging
+    
+    # Run integration tests
+    npm run test:integration
+    
+    # Load testing
+    npm run test:load
+    ```
+  </Step>
+
+  <Step title="Staging Approval">
+    - QA team approval
+    - Security scan results
+    - Performance benchmarks met
+  </Step>
+
+  <Step title="Deploy to Production">
+    ```bash
+    # Create production release
+    git tag -a v1.2.0 -m "Release v1.2.0"
+    git push origin v1.2.0
+    
+    # Deploy to production (requires confirmation)
+    ./deploy.sh prod
+    # Type: PRODUCCION
+    
+    # Monitor deployment
+    kubectl get pods -n govtech -w
+    ```
+  </Step>
+
+  <Step title="Post-Deployment Verification">
+    ```bash
+    # Check health
+    curl https://govtech.example.com/api/health
+    
+    # Monitor logs
+    kubectl logs -f deployment/backend -n govtech
+    
+    # Check metrics in CloudWatch
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+### Environment Isolation
+
+- Use separate AWS accounts for prod (recommended)
+- Different VPC CIDRs to prevent peering conflicts
+- Separate ECR repositories with environment tags
+- Environment-specific IAM roles
+
+### Data Management
+
+- **Never** copy production data to dev/staging without sanitization
+- Use synthetic test data in dev
+- Use anonymized data in staging (if needed)
+- Regular backups in all environments
+
+### Access Control
+
+```bash
+# Developers: Full access to dev, read-only to staging
+# QA Team: Full access to staging, read-only to prod
+# Ops Team: Full access to all environments
+# Emergency: Break-glass access to prod
+```
+
+## Monitoring by Environment
+
+### Development
+
+- Basic CloudWatch metrics
+- Container insights (optional)
+- Log retention: 7 days
+
+### Staging
+
+- Full CloudWatch metrics
+- Container insights enabled
+- Log retention: 30 days
+- Performance testing metrics
+
+### Production
+
+- Full CloudWatch metrics
+- Container insights enabled
+- Log retention: 90 days
+- Custom business metrics
+- Real User Monitoring (RUM)
+- Alerting and on-call rotation
+
+## Next Steps
+
+1. [Set up rollback procedures](/deployment/rollback-procedures)
+2. [Configure monitoring and alerts](/monitoring/overview)
+3. [Implement CI/CD pipelines](/cicd/overview)

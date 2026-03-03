@@ -1,0 +1,307 @@
+---
+title: Deployment Configurations
+description: Kubernetes Deployment configurations for frontend, backend, and database workloads
+---
+
+# Deployment Configurations
+
+This reference documents the Kubernetes Deployment and StatefulSet configurations used across the GovTech Multicloud Platform.
+
+## Frontend Deployment
+
+The frontend deployment runs a React application served by Nginx.
+
+### Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: govtech
+  labels:
+    app: frontend
+    tier: presentation
+    component: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+```
+
+**Source:** `platform/kubernetes/frontend/deployment.yaml:1-19`
+
+### Resource Limits
+
+The frontend has modest resource requirements as it serves static files:
+
+```yaml
+resources:
+  requests:
+    memory: "128Mi"   # 128 MB minimum (static files)
+    cpu: "100m"       # 0.1 cores (10% of CPU)
+  limits:
+    memory: "256Mi"   # 256 MB maximum
+    cpu: "200m"       # 0.2 cores (20% of CPU)
+```
+
+**Source:** `platform/kubernetes/frontend/deployment.yaml:78-84`
+
+### Health Checks
+
+Nginx health probes ensure the frontend is responsive:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /
+    port: 80
+    scheme: HTTP
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 3
+  successThreshold: 1
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 80
+    scheme: HTTP
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 2
+  successThreshold: 1
+  failureThreshold: 3
+```
+
+**Source:** `platform/kubernetes/frontend/deployment.yaml:54-75`
+
+### Security Context
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 101      # Nginx user
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+    - ALL
+```
+
+**Source:** `platform/kubernetes/frontend/deployment.yaml:87-94`
+
+## Backend Deployment
+
+The backend deployment runs the Node.js API application.
+
+### Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: govtech
+  labels:
+    app: backend
+    tier: application
+    component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+```
+
+**Source:** `platform/kubernetes/backend/deployment.yaml:1-19`
+
+### Resource Limits
+
+The backend requires more resources for API processing:
+
+```yaml
+resources:
+  requests:
+    memory: "256Mi"   # 256 megabytes minimum
+    cpu: "250m"       # 0.25 cores (25% of CPU) minimum
+  limits:
+    memory: "512Mi"   # 512 megabytes maximum
+    cpu: "500m"       # 0.5 cores (50% of CPU) maximum
+```
+
+**Source:** `platform/kubernetes/backend/deployment.yaml:71-79`
+
+### Health Checks
+
+The backend uses `/api/health` endpoint for health checks:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: 3000
+    scheme: HTTP
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  successThreshold: 1
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /api/health
+    port: 3000
+    scheme: HTTP
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  successThreshold: 1
+  failureThreshold: 3
+```
+
+**Source:** `platform/kubernetes/backend/deployment.yaml:44-68`
+
+### Environment Configuration
+
+```yaml
+envFrom:
+- configMapRef:
+    name: govtech-config
+- secretRef:
+    name: govtech-secrets
+```
+
+**Source:** `platform/kubernetes/backend/deployment.yaml:38-42`
+
+## Database StatefulSet
+
+PostgreSQL runs as a StatefulSet to maintain persistent storage and stable network identity.
+
+### Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: govtech
+  labels:
+    app: postgres
+    tier: database
+    version: "15"
+spec:
+  replicas: 1
+  serviceName: postgres
+  selector:
+    matchLabels:
+      app: postgres
+```
+
+**Source:** `platform/kubernetes/database/statefulset.yaml:14-30`
+
+### Volume Claim Template
+
+StatefulSet automatically creates persistent volume claims:
+
+```yaml
+volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: gp2
+      resources:
+        requests:
+          storage: 20Gi
+```
+
+**Source:** `platform/kubernetes/database/statefulset.yaml:38-47`
+
+### Resource Limits
+
+```yaml
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"    # 0.25 CPU cores
+  limits:
+    memory: "512Mi"
+    cpu: "500m"    # 0.5 CPU cores
+```
+
+**Source:** `platform/kubernetes/database/statefulset.yaml:107-113`
+
+### Health Checks
+
+PostgreSQL uses `pg_isready` for health verification:
+
+```yaml
+livenessProbe:
+  exec:
+    command:
+      - pg_isready
+      - -U
+      - $(POSTGRES_USER)
+      - -d
+      - $(POSTGRES_DB)
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command:
+      - pg_isready
+      - -U
+      - $(POSTGRES_USER)
+      - -d
+      - $(POSTGRES_DB)
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+```
+
+**Source:** `platform/kubernetes/database/statefulset.yaml:125-150`
+
+## Rolling Update Strategy
+
+Both frontend and backend use RollingUpdate strategy:
+
+- **maxSurge: 1** - Create 1 extra pod during updates
+- **maxUnavailable: 0** - Never have all pods down during updates
+- **terminationGracePeriodSeconds: 30** - Allow 30s for graceful shutdown
+
+This ensures zero-downtime deployments.
+
+## Security Best Practices
+
+All deployments implement:
+
+- **runAsNonRoot: true** - Containers don't run as root user
+- **readOnlyRootFilesystem** - Prevents filesystem modifications (where possible)
+- **Drop all capabilities** - Minimal Linux capabilities
+- **allowPrivilegeEscalation: false** - Prevents privilege escalation
+
+## Configuration Management
+
+Applications receive configuration through:
+
+- **ConfigMaps** - Non-sensitive configuration (`govtech-config`)
+- **Secrets** - Sensitive data like database credentials (`govtech-secrets`)
+- **Environment variables** - Application-specific settings

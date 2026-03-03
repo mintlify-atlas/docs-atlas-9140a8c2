@@ -1,0 +1,715 @@
+---
+title: Compliance & Auditing
+description: Security audit procedures, compliance frameworks, and monitoring for the GovTech Multicloud Platform
+---
+
+## Compliance Frameworks
+
+The GovTech Multicloud Platform is designed to meet government-grade security and compliance requirements:
+
+<CardGroup cols={2}>
+  <Card title="CIS AWS Foundations" icon="shield-check">
+    **v1.4.0 Benchmark**
+    
+    Best practices for AWS security configuration
+  </Card>
+  <Card title="AWS Best Practices" icon="aws">
+    **Foundational Security**
+    
+    Continuous monitoring of AWS security controls
+  </Card>
+  <Card title="FISMA Ready" icon="building-columns">
+    **Federal Requirements**
+    
+    Government-grade security controls for US agencies
+  </Card>
+  <Card title="FedRAMP Ready" icon="certificate">
+    **Cloud Authorization**
+    
+    Cloud service provider security assessment framework
+  </Card>
+</CardGroup>
+
+## AWS Security Hub
+
+Security Hub provides a **centralized dashboard** for all security findings:
+
+### Enabled Standards
+
+<Tabs>
+  <Tab title="CIS AWS Foundations v1.4.0">
+    **Automated Checks:**
+    
+    <AccordionGroup>
+      <Accordion title="IAM Controls (17 checks)">
+        - Password policy requirements (min 14 characters, complexity)
+        - MFA enabled for all users
+        - Root account MFA enabled
+        - No root account access keys
+        - Access keys rotated every 90 days
+        - Unused credentials removed within 90 days
+        - IAM policies attached to groups, not users
+      </Accordion>
+      
+      <Accordion title="Logging & Monitoring (15 checks)">
+        - CloudTrail enabled in all regions
+        - CloudTrail log file validation enabled
+        - S3 bucket access logging enabled
+        - CloudWatch log metric filters for security events
+        - VPC Flow Logs enabled
+        - AWS Config enabled
+      </Accordion>
+      
+      <Accordion title="Network Security (8 checks)">
+        - Default security groups block all traffic
+        - Security groups don't allow 0.0.0.0/0 ingress
+        - VPCs have route tables properly configured
+        - No unused network ACLs or security groups
+      </Accordion>
+      
+      <Accordion title="Data Protection (12 checks)">
+        - EBS volumes encrypted
+        - RDS instances encrypted at rest
+        - S3 buckets not publicly accessible
+        - S3 bucket versioning enabled
+        - KMS key rotation enabled
+      </Accordion>
+    </AccordionGroup>
+  </Tab>
+  
+  <Tab title="AWS Foundational Security Best Practices">
+    **Additional Checks:**
+    
+    - EC2 instances in VPC (not EC2-Classic)
+    - ELB deletion protection enabled
+    - Lambda functions in VPC (if accessing VPC resources)
+    - RDS automated backups enabled
+    - S3 bucket policies don't allow public write access
+    - Secrets Manager automatic rotation enabled
+    - Systems Manager patch compliance
+  </Tab>
+</Tabs>
+
+### Viewing Security Hub Findings
+
+```bash
+# Get critical severity findings
+aws securityhub get-findings \
+  --filters '{"SeverityLabel": [{"Value": "CRITICAL", "Comparison": "EQUALS"}]}' \
+  --query 'Findings[*].{Title:Title,Severity:Severity.Label,Status:Compliance.Status}' \
+  --output table
+
+# Get findings by standard
+aws securityhub get-findings \
+  --filters '{"ProductName": [{"Value": "Security Hub", "Comparison": "EQUALS"}], "ComplianceStatus": [{"Value": "FAILED", "Comparison": "EQUALS"}]}' \
+  --query 'Findings[*].{Title:Title,Resource:Resources[0].Id,Status:Compliance.Status}' \
+  --output table
+
+# Get compliance score
+aws securityhub get-compliance-summary-by-config-rule
+```
+
+## CloudTrail Auditing
+
+CloudTrail records **every API call** made in the AWS account for complete audit trails:
+
+### What CloudTrail Logs
+
+<Tabs>
+  <Tab title="IAM Events">
+    **User and Role Activity:**
+    ```json
+    {
+      "eventName": "AssumeRole",
+      "userIdentity": {
+        "type": "IAMUser",
+        "userName": "govtech-admin"
+      },
+      "sourceIPAddress": "203.0.113.12",
+      "eventTime": "2026-03-03T14:23:45Z",
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::835960996869:role/govtech-eks-admin"
+      }
+    }
+    ```
+    
+    **Tracked Actions:**
+    - User login attempts
+    - Role assumptions
+    - Access key creation/deletion
+    - Policy changes
+    - MFA device changes
+  </Tab>
+  
+  <Tab title="Resource Changes">
+    **Infrastructure Modifications:**
+    ```json
+    {
+      "eventName": "RunInstances",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AIDACKCEVSQ6C2EXAMPLE:govtech-admin"
+      },
+      "requestParameters": {
+        "instanceType": "t3.medium",
+        "imageId": "ami-0abcdef1234567890"
+      },
+      "eventTime": "2026-03-03T15:10:22Z"
+    }
+    ```
+    
+    **Tracked Actions:**
+    - EC2 instance creation/termination
+    - Security group modifications
+    - RDS database changes
+    - S3 bucket policy updates
+    - EKS cluster modifications
+  </Tab>
+  
+  <Tab title="Data Access">
+    **S3 Data Events:**
+    ```json
+    {
+      "eventName": "GetObject",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AIDACKCEVSQ6C2EXAMPLE:backend-pod"
+      },
+      "requestParameters": {
+        "bucketName": "govtech-application-data",
+        "key": "sensitive-document.pdf"
+      },
+      "eventTime": "2026-03-03T16:05:33Z",
+      "sourceIPAddress": "10.0.1.45"
+    }
+    ```
+    
+    **Tracked Actions:**
+    - S3 object reads/writes
+    - Secrets Manager access
+    - RDS data API calls
+    - DynamoDB table access
+  </Tab>
+</Tabs>
+
+### Common Audit Queries
+
+<CodeGroup>
+```bash User Activity
+# View all actions by a specific user
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=Username,AttributeValue=govtech-admin \
+  --start-time 2026-03-01 \
+  --end-time 2026-03-03 \
+  --query 'Events[*].{Time:EventTime,Event:EventName,User:Username,IP:SourceIPAddress}' \
+  --output table
+```
+
+```bash Failed Operations
+# Find all failed API calls (potential security incidents)
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=DeleteDBInstance \
+  --query 'Events[*].{Time:EventTime,Event:EventName,User:Username,Error:CloudTrailEvent}' \
+  --output table
+```
+
+```bash Root Account Usage
+# Alert: Root account should NEVER be used
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=Username,AttributeValue=root \
+  --max-results 10
+```
+
+```bash After-Hours Access
+# Check for activity outside business hours (potential compromise)
+aws cloudtrail lookup-events \
+  --start-time $(date -u -d '18:00 yesterday' +%Y-%m-%dT%H:%M:%S) \
+  --end-time $(date -u -d '06:00 today' +%Y-%m-%dT%H:%M:%S) \
+  --query 'Events[*].{Time:EventTime,Event:EventName,User:Username}' \
+  --output table
+```
+</CodeGroup>
+
+## GuardDuty Threat Detection
+
+GuardDuty uses **machine learning** to detect threats in real-time:
+
+### Threat Categories
+
+<AccordionGroup>
+  <Accordion title="Network Threats" icon="network-wired">
+    **Backdoor Activity:**
+    - Pod communicating with known botnet IPs
+    - Outbound traffic to cryptocurrency mining pools
+    - DNS queries to malicious domains
+    
+    **Example Finding:**
+    ```
+    Finding Type: Backdoor:EC2/C&CActivity.B!DNS
+    Severity: High
+    Description: EC2 instance is querying a domain name associated with 
+                 a known command and control server.
+    Resource: i-0abcdef1234567890
+    Action: DNS request to malicious-domain.com from 10.0.1.45
+    ```
+  </Accordion>
+  
+  <Accordion title="Credential Compromise" icon="key">
+    **Suspicious Access:**
+    - AWS credentials used from unusual location
+    - API calls from Tor exit nodes
+    - Multiple failed login attempts
+    - Access keys used from multiple IP addresses simultaneously
+    
+    **Example Finding:**
+    ```
+    Finding Type: UnauthorizedAccess:IAMUser/TorIPCaller
+    Severity: Medium
+    Description: API call from a Tor exit node IP address
+    User: govtech-admin
+    Source IP: 185.220.101.15 (Tor)
+    ```
+  </Accordion>
+  
+  <Accordion title="Data Exfiltration" icon="download">
+    **Unusual Data Transfer:**
+    - Large S3 downloads to unfamiliar IP
+    - RDS snapshot shared with external account
+    - EBS snapshot copied to different region
+    
+    **Example Finding:**
+    ```
+    Finding Type: Exfiltration:S3/ObjectRead.Unusual
+    Severity: High
+    Description: S3 objects downloaded from unusual location
+    Bucket: govtech-application-data
+    Source IP: 203.0.113.45 (China)
+    Volume: 500GB in 1 hour
+    ```
+  </Accordion>
+  
+  <Accordion title="Kubernetes Threats" icon="dharmachakra">
+    **EKS-Specific Detections:**
+    - Privileged container launched
+    - Anonymous API requests to Kubernetes API
+    - ServiceAccount token abuse
+    - Pod communicating with crypto mining service
+    
+    **Example Finding:**
+    ```
+    Finding Type: PrivilegeEscalation:Kubernetes/PrivilegedContainer
+    Severity: High
+    Description: Privileged container launched in EKS cluster
+    Cluster: govtech-prod
+    Namespace: govtech
+    Pod: suspicious-pod-xyz
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Reviewing GuardDuty Findings
+
+```bash
+# List all active findings
+aws guardduty list-findings \
+  --detector-id <detector-id> \
+  --finding-criteria '{"Criterion":{"severity":{"Gte":7}}}'
+
+# Get detailed finding information
+aws guardduty get-findings \
+  --detector-id <detector-id> \
+  --finding-ids <finding-id>
+
+# Archive false positives
+aws guardduty archive-findings \
+  --detector-id <detector-id> \
+  --finding-ids <finding-id>
+```
+
+## Audit Procedures
+
+### Daily Security Checks
+
+<Steps>
+  <Step title="Review GuardDuty Findings">
+    ```bash
+    # Check for new critical/high severity findings
+    aws guardduty list-findings \
+      --detector-id $(aws guardduty list-detectors --query 'DetectorIds[0]' --output text) \
+      --finding-criteria '{"Criterion":{"severity":{"Gte":7},"updatedAt":{"Gte":'$(date -u -d '24 hours ago' +%s)000'}}}'
+    ```
+    
+    **Action:** Investigate any high-severity findings immediately.
+  </Step>
+  
+  <Step title="Check Security Hub Compliance">
+    ```bash
+    # View failed compliance checks
+    aws securityhub get-findings \
+      --filters '{"ComplianceStatus":[{"Value":"FAILED","Comparison":"EQUALS"}],"RecordState":[{"Value":"ACTIVE","Comparison":"EQUALS"}]}' \
+      --max-results 10
+    ```
+    
+    **Action:** Remediate failed checks or document exceptions.
+  </Step>
+  
+  <Step title="Review CloudTrail for Anomalies">
+    ```bash
+    # Check for after-hours activity
+    aws cloudtrail lookup-events \
+      --start-time $(date -u -d '18:00 yesterday' +%Y-%m-%dT%H:%M:%S) \
+      --end-time $(date -u -d '06:00 today' +%Y-%m-%dT%H:%M:%S)
+    ```
+    
+    **Action:** Verify legitimacy of after-hours access.
+  </Step>
+</Steps>
+
+### Weekly Security Review
+
+<Accordion title="Weekly Security Checklist">
+  - [ ] Review all GuardDuty findings from past week
+  - [ ] Check for users without MFA enabled
+  - [ ] Verify no public S3 buckets
+  - [ ] Review IAM access keys older than 90 days
+  - [ ] Check CloudWatch alarms (any triggered?)
+  - [ ] Review WAF blocked requests
+  - [ ] Verify CloudTrail is logging to S3
+  - [ ] Check for unused security groups
+  - [ ] Review VPC Flow Logs for denied traffic
+  - [ ] Validate backup procedures executed successfully
+</Accordion>
+
+### Monthly Compliance Audit
+
+<Steps>
+  <Step title="IAM Access Review">
+    ```bash
+    # List all IAM users and their group memberships
+    aws iam list-users --query 'Users[*].UserName' --output text | \
+      xargs -I {} aws iam list-groups-for-user --user-name {}
+    
+    # Check for users with direct policy attachments (violates best practice)
+    aws iam list-users --query 'Users[*].UserName' --output text | \
+      xargs -I {} aws iam list-attached-user-policies --user-name {}
+    ```
+    
+    **Action:** Remove users no longer needing access; move inline policies to groups.
+  </Step>
+  
+  <Step title="Network Security Audit">
+    ```bash
+    # Find security groups allowing 0.0.0.0/0
+    aws ec2 describe-security-groups \
+      --filters Name=ip-permission.cidr,Values=0.0.0.0/0 \
+      --query 'SecurityGroups[*].{ID:GroupId,Name:GroupName,VPC:VpcId}'
+    ```
+    
+    **Action:** Restrict overly permissive security groups.
+  </Step>
+  
+  <Step title="Secrets and Key Rotation">
+    ```bash
+    # Check access key age
+    aws iam list-users --query 'Users[*].UserName' --output text | \
+      xargs -I {} aws iam list-access-keys --user-name {} \
+      --query 'AccessKeyMetadata[?CreateDate<=`'$(date -u -d '90 days ago' +%Y-%m-%d)'`].{User:UserName,KeyId:AccessKeyId,Created:CreateDate}'
+    ```
+    
+    **Action:** Rotate keys older than 90 days.
+  </Step>
+  
+  <Step title="Generate Compliance Report">
+    ```bash
+    # Export Security Hub findings to CSV
+    aws securityhub get-findings \
+      --max-results 100 \
+      --query 'Findings[*].{Title:Title,Severity:Severity.Label,Status:Compliance.Status,Resource:Resources[0].Id}' \
+      --output table > security-hub-report-$(date +%Y-%m).txt
+    ```
+    
+    **Action:** Share report with security team and management.
+  </Step>
+</Steps>
+
+## CloudWatch Alarms
+
+The platform has automated alarms for critical security events:
+
+### Configured Alarms
+
+<Tabs>
+  <Tab title="Root Account Usage">
+    **Alarm:** `govtech-root-account-usage-prod`
+    
+    **Trigger:** Root account used for any action
+    
+    **Severity:** CRITICAL
+    
+    **Response:**
+    1. Immediate investigation required
+    2. Verify legitimacy with account owner
+    3. If unauthorized, rotate root credentials
+    4. Enable MFA if not already active
+    
+    ```bash
+    # Check who used root account
+    aws cloudtrail lookup-events \
+      --lookup-attributes AttributeKey=Username,AttributeValue=root \
+      --max-results 5
+    ```
+  </Tab>
+  
+  <Tab title="Unauthorized API Calls">
+    **Alarm:** `govtech-unauthorized-api-prod`
+    
+    **Trigger:** 5+ unauthorized API calls in 5 minutes
+    
+    **Severity:** HIGH
+    
+    **Response:**
+    1. Check if credentials are compromised
+    2. Review IAM policies for misconfigurations
+    3. Temporarily disable access keys if needed
+    
+    ```bash
+    # Find unauthorized calls
+    aws cloudtrail lookup-events \
+      --lookup-attributes AttributeKey=EventName,AttributeValue=UnauthorizedOperation
+    ```
+  </Tab>
+  
+  <Tab title="Cost Anomaly">
+    **Alarm:** `govtech-cost-alert-prod`
+    
+    **Trigger:** Unexpected spend increase > $50
+    
+    **Severity:** MEDIUM
+    
+    **Response:**
+    1. Check for unauthorized resource creation
+    2. Look for cryptocurrency mining (GuardDuty)
+    3. Review CloudWatch metrics for unusual activity
+    
+    ```bash
+    # Check recent resource creation
+    aws ce get-cost-and-usage \
+      --time-period Start=$(date -u -d '7 days ago' +%Y-%m-%d),End=$(date -u +%Y-%m-%d) \
+      --granularity DAILY \
+      --metrics BlendedCost \
+      --group-by Type=SERVICE
+    ```
+  </Tab>
+</Tabs>
+
+## Incident Response
+
+### Security Incident Playbook
+
+<Steps>
+  <Step title="Detection & Triage" icon="radar">
+    **Immediate Actions:**
+    - Confirm incident is genuine (not false positive)
+    - Assess severity (Critical, High, Medium, Low)
+    - Document initial findings
+    - Notify security team
+    
+    **Questions to Answer:**
+    - What resource is affected?
+    - When did the incident occur?
+    - What is the potential impact?
+    - Is data at risk?
+  </Step>
+  
+  <Step title="Containment" icon="shield">
+    **Isolate Affected Resources:**
+    ```bash
+    # Isolate compromised EC2 instance
+    aws ec2 modify-instance-attribute \
+      --instance-id i-xxxxx \
+      --groups sg-isolated  # Empty security group
+    
+    # Disable compromised IAM user
+    aws iam update-access-key \
+      --user-name compromised-user \
+      --access-key-id AKIA_XXXXX \
+      --status Inactive
+    
+    # Delete compromised pod
+    kubectl delete pod suspicious-pod -n govtech
+    ```
+  </Step>
+  
+  <Step title="Investigation" icon="magnifying-glass">
+    **Gather Evidence:**
+    ```bash
+    # CloudTrail logs
+    aws cloudtrail lookup-events \
+      --lookup-attributes AttributeKey=Username,AttributeValue=compromised-user \
+      --start-time $(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%S)
+    
+    # VPC Flow Logs
+    aws logs filter-log-events \
+      --log-group-name /aws/vpc/flow-logs \
+      --filter-pattern '[version, account, eni, source="10.0.1.45", *]'
+    
+    # GuardDuty findings
+    aws guardduty list-findings --detector-id <id>
+    ```
+    
+    **Document:**
+    - Timeline of events
+    - Affected resources
+    - Data accessed or exfiltrated
+    - Attack vector
+  </Step>
+  
+  <Step title="Eradication" icon="broom">
+    **Remove Threat:**
+    - Terminate compromised instances
+    - Revoke all credentials for affected users
+    - Patch vulnerabilities exploited
+    - Remove backdoors or malware
+    
+    ```bash
+    # Force password reset
+    aws iam update-login-profile \
+      --user-name affected-user \
+      --password-reset-required
+    
+    # Terminate all sessions
+    aws sts revoke-session \
+      --user-name affected-user
+    ```
+  </Step>
+  
+  <Step title="Recovery" icon="arrows-rotate">
+    **Restore Normal Operations:**
+    - Deploy clean instances
+    - Restore from known-good backups
+    - Issue new credentials
+    - Verify security controls
+    
+    ```bash
+    # Restore from RDS snapshot (pre-incident)
+    aws rds restore-db-instance-from-db-snapshot \
+      --db-instance-identifier govtech-prod-restored \
+      --db-snapshot-identifier govtech-prod-2026-03-01
+    ```
+  </Step>
+  
+  <Step title="Post-Incident Review" icon="clipboard-list">
+    **Document Lessons Learned:**
+    - What happened and why?
+    - What worked well in response?
+    - What could be improved?
+    - What controls should be added?
+    
+    **Actions:**
+    - Update incident response playbook
+    - Implement additional security controls
+    - Provide team training
+    - Share findings with stakeholders
+  </Step>
+</Steps>
+
+## Compliance Reporting
+
+### Generate Compliance Reports
+
+```bash
+# Security Hub compliance summary
+aws securityhub get-compliance-summary-by-resource-type \
+  --query 'ResourceTypeSummaries[*].{Type:ResourceType,Passed:PassedCount,Failed:FailedCount}' \
+  --output table
+
+# Export to JSON for processing
+aws securityhub get-findings \
+  --max-results 1000 > security-hub-findings-$(date +%Y-%m-%d).json
+
+# CloudTrail event history
+aws cloudtrail lookup-events \
+  --start-time $(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%S) \
+  --max-results 10000 > cloudtrail-events-$(date +%Y-%m-%d).json
+```
+
+### Monthly Security Report Template
+
+<Accordion title="Monthly Security Report Outline">
+  **Executive Summary**
+  - Overall security posture (Green/Yellow/Red)
+  - Critical incidents (if any)
+  - Compliance status
+  
+  **Security Metrics**
+  - GuardDuty findings: X critical, Y high, Z medium
+  - Security Hub compliance: XX% passing
+  - CloudTrail events processed: XXX,XXX
+  - WAF requests blocked: XX,XXX
+  
+  **Incidents**
+  - Number of security incidents
+  - Mean time to detect (MTTD)
+  - Mean time to respond (MTTR)
+  - Lessons learned
+  
+  **Remediation Activities**
+  - Vulnerabilities patched
+  - Access keys rotated
+  - Users with MFA enabled
+  - Security groups hardened
+  
+  **Compliance Status**
+  - CIS AWS Foundations: XX% compliant
+  - AWS Best Practices: XX% compliant
+  - Outstanding issues
+  - Remediation plan
+  
+  **Recommendations**
+  - Short-term actions (next 30 days)
+  - Long-term improvements (next quarter)
+</Accordion>
+
+## Automated Compliance Tools
+
+### AWS Config Rules
+
+AWS Config continuously monitors configuration compliance:
+
+```bash
+# Check compliance status
+aws configservice describe-compliance-by-config-rule \
+  --query 'ComplianceByConfigRules[?Compliance.ComplianceType!=`COMPLIANT`]'
+
+# Get detailed compliance report
+aws configservice get-compliance-summary-by-config-rule
+```
+
+### Prowler (Open Source)
+
+Prowler is an AWS security assessment tool:
+
+```bash
+# Install Prowler
+pip install prowler
+
+# Run full security assessment
+prowler aws --severity critical high
+
+# Check specific compliance framework
+prowler aws --compliance cis_1.4_aws
+
+# Generate HTML report
+prowler aws --output-modes html json
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Security Overview" icon="shield" href="/security/overview">
+    Review overall security architecture
+  </Card>
+  <Card title="IAM Policies" icon="users" href="/security/iam-policies">
+    Detailed IAM policy documentation
+  </Card>
+</CardGroup>

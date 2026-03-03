@@ -1,0 +1,486 @@
+---
+title: Backup and Restore Procedures
+description: Automated backup strategies and restoration procedures for GovTech platform data
+---
+
+## Overview
+
+The GovTech platform implements automated daily backups for all critical data, with separate retention policies for production and development environments.
+
+## Backup Strategy
+
+<CardGroup cols={2}>
+  <Card title="RDS Automated Backups" icon="aws">
+    AWS-managed automated snapshots with point-in-time recovery
+  </Card>
+  <Card title="PostgreSQL Dumps" icon="database">
+    Custom pg_dump backups stored in S3 for additional safety
+  </Card>
+  <Card title="Terraform State" icon="file-code">
+    Versioned infrastructure state in S3
+  </Card>
+  <Card title="Application Data" icon="folder">
+    User uploads and files in S3 with versioning
+  </Card>
+</CardGroup>
+
+## Automated PostgreSQL Backup
+
+### Backup Schedule
+
+| Environment | Frequency | Time (UTC) | Retention |
+|-------------|-----------|------------|----------|
+| Production | Daily | 2:00 AM | 30 days |
+| Staging | Daily | 2:00 AM | 14 days |
+| Development | Daily | 2:00 AM | 7 days |
+
+### Ansible Playbook
+
+The backup process is automated using Ansible: `ansible/playbooks/backup.yml`
+
+**What it does**:
+1. Connects to PostgreSQL pod in Kubernetes
+2. Executes `pg_dump` to create complete database backup
+3. Compresses backup with gzip (level 9)
+4. Uploads to S3 with date-stamped filename
+5. Verifies backup integrity
+6. Cleans up temporary files
+7. Deletes backups older than retention period
+
+### Manual Backup Execution
+
+```bash
+# Run backup manually
+ansible-playbook -i ansible/inventory/hosts.yml \
+  ansible/playbooks/backup.yml
+
+# Override retention period
+ansible-playbook ansible/playbooks/backup.yml \
+  -e "retention_days=30 namespace=govtech"
+```
+
+### Scheduled Execution
+
+Set up automated backups using cron or AWS EventBridge:
+
+<CodeGroup>
+```bash Cron (Linux)
+# Edit crontab
+crontab -e
+
+# Add this line for daily backup at 2am UTC
+0 2 * * * ansible-playbook /opt/govtech/ansible/playbooks/backup.yml >> /var/log/govtech-backup.log 2>&1
+```
+
+```yaml EventBridge (AWS)
+# CloudWatch Events rule for daily backup
+ScheduleExpression: cron(0 2 * * ? *)
+Target: ECS Task or Lambda that runs Ansible playbook
+```
+</CodeGroup>
+
+## Backup Process Details
+
+### Step 1: Database Dump
+
+The playbook uses PostgreSQL's `pg_dump` with custom format:
+
+```bash
+pg_dump \
+  --username=govtech_admin \
+  --dbname=govtech \
+  --format=custom \
+  --compress=9 \
+  --file=/tmp/govtech_YYYYMMDD_HHMM.dump
+```
+
+**Why custom format?**
+- More efficient than SQL plain text
+- Enables parallel restoration
+- Allows selective table restoration
+- Built-in compression
+
+### Step 2: Copy to Local
+
+```bash
+kubectl cp \
+  govtech/postgres-0:/tmp/govtech_YYYYMMDD_HHMM.dump \
+  /tmp/govtech-backups/govtech_YYYYMMDD_HHMM.dump
+```
+
+### Step 3: Integrity Verification
+
+```bash
+# Verify backup is valid without restoring
+pg_restore --list /tmp/govtech_YYYYMMDD_HHMM.dump
+
+# Count tables included
+echo "$RESTORE_OUTPUT" | grep -c 'TABLE DATA'
+```
+
+<Info>
+The backup process validates the dump file before uploading to S3, ensuring you never store corrupted backups.
+</Info>
+
+### Step 4: Upload to S3
+
+```bash
+aws s3 cp /tmp/govtech_YYYYMMDD_HHMM.dump \
+  s3://govtech-prod-app-storage-835960996869/backups/postgresql/ \
+  --storage-class STANDARD_IA \
+  --region us-east-1
+```
+
+**Storage Class**: `STANDARD_IA` (Infrequent Access)
+- Lower cost than STANDARD
+- Suitable for backups (rarely accessed)
+- Same durability (99.999999999%)
+
+### Step 5: Cleanup and Rotation
+
+```bash
+# Delete backups older than retention_days
+aws s3api list-objects-v2 \
+  --bucket govtech-prod-app-storage-835960996869 \
+  --prefix backups/postgresql/ \
+  --query "Contents[?LastModified<='RETENTION_DATE'].Key" \
+  --output text | xargs -I {} aws s3 rm s3://BUCKET/{}
+```
+
+## RDS Automated Backups
+
+### Configuration
+
+RDS provides automated snapshots configured via Terraform:
+
+```hcl terraform/modules/database/aws.tf
+resource "aws_db_instance" "govtech" {
+  backup_retention_period = 30  # Production: 30 days
+  backup_window          = "02:00-03:00"  # UTC
+  preferred_backup_window = "02:00-03:00"
+  
+  # Enable automated backups
+  skip_final_snapshot = false
+  final_snapshot_identifier = "govtech-prod-final-snapshot"
+}
+```
+
+### List RDS Snapshots
+
+```bash
+# List automated snapshots
+aws rds describe-db-snapshots \
+  --db-instance-identifier govtech-prod-postgres \
+  --snapshot-type automated \
+  --query 'DBSnapshots[*].{Date:SnapshotCreateTime,ID:DBSnapshotIdentifier,Size:AllocatedStorage}' \
+  --output table
+
+# List manual snapshots
+aws rds describe-db-snapshots \
+  --db-instance-identifier govtech-prod-postgres \
+  --snapshot-type manual \
+  --output table
+```
+
+### Create Manual Snapshot
+
+```bash
+# Create manual snapshot (kept until manually deleted)
+aws rds create-db-snapshot \
+  --db-instance-identifier govtech-prod-postgres \
+  --db-snapshot-identifier govtech-prod-manual-$(date +%Y%m%d-%H%M)
+```
+
+## Restoration Procedures
+
+### Restore from RDS Snapshot
+
+Use the automated restoration script:
+
+```bash disaster-recovery/scripts/restore-database.sh
+chmod +x disaster-recovery/scripts/restore-database.sh
+
+# Restore from latest snapshot
+./disaster-recovery/scripts/restore-database.sh \
+  --snapshot latest \
+  --environment prod
+
+# Restore from specific snapshot
+./disaster-recovery/scripts/restore-database.sh \
+  --snapshot rds:govtech-prod-postgres-2026-03-01-02-00 \
+  --environment prod
+```
+
+<Warning>
+**Production Restoration Approval**
+
+The script requires approval code for production: `RESTORE-PROD-YYYYMMDD`
+
+This prevents accidental production restores.
+</Warning>
+
+### Script Workflow
+
+<Steps>
+  <Step title="Identify Snapshot">
+    If `--snapshot latest`, automatically finds most recent snapshot
+    
+    ```bash
+    aws rds describe-db-snapshots \
+      --db-instance-identifier govtech-prod-postgres \
+      --snapshot-type automated \
+      --query 'sort_by(DBSnapshots, &SnapshotCreateTime)[-1].DBSnapshotIdentifier'
+    ```
+  </Step>
+
+  <Step title="Validate Snapshot">
+    Verify snapshot exists and is in 'available' state
+    
+    ```bash
+    aws rds describe-db-snapshots \
+      --db-snapshot-identifier $SNAPSHOT_ID \
+      --query 'DBSnapshots[0].{Date:SnapshotCreateTime,Size:AllocatedStorage,Status:Status}'
+    ```
+  </Step>
+
+  <Step title="Request Approval (Production Only)">
+    For production environments, require approval code
+  </Step>
+
+  <Step title="Restore to New Instance">
+    Creates new RDS instance from snapshot
+    
+    ```bash
+    aws rds restore-db-instance-from-db-snapshot \
+      --db-instance-identifier govtech-prod-postgres-restored-TIMESTAMP \
+      --db-snapshot-identifier $SNAPSHOT_ID \
+      --db-instance-class db.t3.micro \
+      --no-publicly-accessible
+    ```
+    
+    <Info>
+    The script creates a NEW instance rather than overwriting the existing one. This allows rollback if needed.
+    </Info>
+  </Step>
+
+  <Step title="Wait for Availability">
+    ```bash
+    aws rds wait db-instance-available \
+      --db-instance-identifier govtech-prod-postgres-restored-TIMESTAMP
+    ```
+    
+    **Typical time**: 10-30 minutes depending on database size
+  </Step>
+
+  <Step title="Get New Endpoint">
+    ```bash
+    NEW_ENDPOINT=$(aws rds describe-db-instances \
+      --db-instance-identifier govtech-prod-postgres-restored-TIMESTAMP \
+      --query 'DBInstances[0].Endpoint.Address' \
+      --output text)
+    ```
+  </Step>
+</Steps>
+
+### Update Application
+
+After restoration, point the application to the new database:
+
+```bash
+# Update Kubernetes ConfigMap
+kubectl edit configmap govtech-config -n govtech
+# Change DB_HOST to new endpoint
+
+# Restart backend pods
+kubectl rollout restart deployment/backend -n govtech
+
+# Verify connectivity
+kubectl exec -it deploy/backend -n govtech -- \
+  psql -h $NEW_ENDPOINT -U govtech_admin -d govtech -c "SELECT version();"
+
+# Run E2E tests
+./tests/e2e/test-deployment.sh
+```
+
+### Restore from S3 Backup (pg_dump)
+
+If RDS snapshots are unavailable, restore from S3 pg_dump backups:
+
+<Steps>
+  <Step title="Download Backup from S3">
+    ```bash
+    # List available backups
+    aws s3 ls s3://govtech-prod-app-storage-835960996869/backups/postgresql/
+    
+    # Download specific backup
+    aws s3 cp \
+      s3://govtech-prod-app-storage-835960996869/backups/postgresql/govtech_20260301_0200.dump \
+      /tmp/restore.dump
+    ```
+  </Step>
+
+  <Step title="Copy to PostgreSQL Pod">
+    ```bash
+    kubectl cp /tmp/restore.dump \
+      govtech/postgres-0:/tmp/restore.dump
+    ```
+  </Step>
+
+  <Step title="Drop and Recreate Database">
+    <Warning>
+    This will delete all current data! Ensure you have a backup of the current state.
+    </Warning>
+    
+    ```bash
+    kubectl exec -it postgres-0 -n govtech -- bash
+    
+    # Inside the pod
+    psql -U postgres
+    DROP DATABASE govtech;
+    CREATE DATABASE govtech;
+    \q
+    ```
+  </Step>
+
+  <Step title="Restore from Dump">
+    ```bash
+    pg_restore \
+      --username=postgres \
+      --dbname=govtech \
+      --verbose \
+      --no-owner \
+      --no-acl \
+      /tmp/restore.dump
+    ```
+  </Step>
+
+  <Step title="Verify Restoration">
+    ```bash
+    psql -U postgres -d govtech
+    
+    # Check tables
+    \dt
+    
+    # Check row counts
+    SELECT count(*) FROM users;
+    SELECT count(*) FROM documents;
+    ```
+  </Step>
+</Steps>
+
+## Backup Monitoring
+
+### CloudWatch Alarms
+
+Set up alarms for backup failures:
+
+```bash
+# Create SNS topic for backup alerts
+aws sns create-topic --name govtech-backup-alerts
+
+# Subscribe email to topic
+aws sns subscribe \
+  --topic-arn arn:aws:sns:us-east-1:ACCOUNT:govtech-backup-alerts \
+  --protocol email \
+  --notification-endpoint devops@govtech.example.com
+```
+
+### Verify Backup Success
+
+```bash
+# Check latest backup in S3
+aws s3 ls s3://govtech-prod-app-storage-835960996869/backups/postgresql/ \
+  --recursive --human-readable --summarize | tail -10
+
+# Verify backup age (should be < 24 hours)
+LATEST=$(aws s3api list-objects-v2 \
+  --bucket govtech-prod-app-storage-835960996869 \
+  --prefix backups/postgresql/ \
+  --query 'sort_by(Contents, &LastModified)[-1].LastModified' \
+  --output text)
+
+echo "Latest backup: $LATEST"
+```
+
+## Backup Best Practices
+
+<Steps>
+  <Step title="3-2-1 Backup Rule">
+    - **3** copies of data (original + 2 backups)
+    - **2** different storage types (RDS snapshots + S3 dumps)
+    - **1** off-site copy (enable S3 cross-region replication for production)
+  </Step>
+
+  <Step title="Test Restorations Monthly">
+    ```bash
+    # Test restore in dev environment
+    ./disaster-recovery/scripts/restore-database.sh \
+      --snapshot latest \
+      --environment dev \
+      --verify-only
+    ```
+  </Step>
+
+  <Step title="Document Restoration Time">
+    Track actual restoration times to verify RTO compliance:
+    - Dev: ~15 minutes
+    - Staging: ~25 minutes
+    - Production: ~45 minutes (larger database)
+  </Step>
+
+  <Step title="Encrypt All Backups">
+    - RDS snapshots: Encrypted with KMS
+    - S3 backups: Server-side encryption enabled
+    - In-transit: TLS for all transfers
+  </Step>
+
+  <Step title="Automate Verification">
+    Run automated tests after backup:
+    - File size > 0
+    - `pg_restore --list` succeeds
+    - Table count matches expected
+  </Step>
+</Steps>
+
+## Storage Costs
+
+### RDS Snapshots
+- **Cost**: $0.095/GB-month (us-east-1)
+- **Estimated**: ~$5-10/month for typical production database
+- **Retention**: 30 days automated, manual snapshots until deleted
+
+### S3 Backups (STANDARD_IA)
+- **Storage**: $0.0125/GB-month
+- **Retrieval**: $0.01/GB (infrequent)
+- **Estimated**: ~$2-5/month for compressed dumps
+
+## Terraform State Backups
+
+Terraform state is automatically versioned in S3:
+
+```bash
+# List all versions of state file
+aws s3api list-object-versions \
+  --bucket govtech-terraform-state-835960996869 \
+  --prefix prod/terraform.tfstate \
+  --query 'Versions[*].{Date:LastModified,VersionId:VersionId,Size:Size}' \
+  --output table
+
+# Restore specific version
+aws s3api get-object \
+  --bucket govtech-terraform-state-835960996869 \
+  --key prod/terraform.tfstate \
+  --version-id <VERSION_ID> \
+  terraform.tfstate.restored
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Disaster Recovery" icon="life-ring" href="/operations/disaster-recovery">
+    Complete DR plan with RTO/RPO targets
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Common backup and restore issues
+  </Card>
+</CardGroup>

@@ -1,122 +1,135 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "GovTech Multicloud Platform",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#1E40AF",
+    "light": "#60A5FA",
+    "dark": "#1E3A8A"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/alexander-fq/multicloud"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/alexander-fq/multicloud"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "platform-overview"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Architecture",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "architecture/overview",
+              "architecture/multicloud-design",
+              "architecture/security-layers",
+              "architecture/network-topology",
+              "architecture/scalability"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Deployment",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "deployment/setup-guide",
+              "deployment/terraform-configuration",
+              "deployment/kubernetes-deployment",
+              "deployment/environments",
+              "deployment/rollback-procedures"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Multi-Cloud",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "multicloud/provider-comparison",
+              "multicloud/aws-implementation",
+              "multicloud/oci-implementation",
+              "multicloud/gcp-implementation",
+              "multicloud/azure-implementation",
+              "multicloud/migration-guide"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/overview",
+              "security/iam-policies",
+              "security/network-policies",
+              "security/secrets-management",
+              "security/compliance"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/monitoring",
+              "operations/disaster-recovery",
+              "operations/backup-restore",
+              "operations/cost-optimization",
+              "operations/troubleshooting"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Terraform Modules",
             "pages": [
-              "api-reference/introduction"
+              "reference/terraform/networking",
+              "reference/terraform/kubernetes-cluster",
+              "reference/terraform/database",
+              "reference/terraform/storage",
+              "reference/terraform/security"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Kubernetes Resources",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "reference/kubernetes/deployments",
+              "reference/kubernetes/services",
+              "reference/kubernetes/networking",
+              "reference/kubernetes/rbac",
+              "reference/kubernetes/autoscaling"
+            ]
+          },
+          {
+            "group": "CI/CD",
+            "pages": [
+              "reference/cicd/pipelines",
+              "reference/cicd/security-scanning",
+              "reference/cicd/deployment-workflows"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Skeleton Template",
+        "groups": [
+          {
+            "group": "Using the Skeleton",
+            "pages": [
+              "skeleton/getting-started",
+              "skeleton/customization",
+              "skeleton/application-integration"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

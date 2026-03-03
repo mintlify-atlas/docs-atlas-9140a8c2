@@ -1,0 +1,404 @@
+---
+title: AWS implementation
+description: AWS-specific implementation details for the GovTech platform
+---
+
+AWS is the fully implemented cloud provider for the GovTech Multicloud Platform. This page documents the AWS-specific services, configurations, and best practices.
+
+## AWS services used
+
+The platform leverages these AWS services:
+
+<CardGroup cols={2}>
+  <Card title="EKS" icon="dharmachakra">
+    **Elastic Kubernetes Service**
+    
+    Managed Kubernetes control plane with worker nodes in private subnets
+  </Card>
+  
+  <Card title="RDS" icon="database">
+    **RDS PostgreSQL**
+    
+    Multi-AZ managed database with automated backups
+  </Card>
+  
+  <Card title="S3" icon="box">
+    **Simple Storage Service**
+    
+    Object storage with versioning and lifecycle policies
+  </Card>
+  
+  <Card title="ECR" icon="docker">
+    **Elastic Container Registry**
+    
+    Private Docker registry with vulnerability scanning
+  </Card>
+  
+  <Card title="Secrets Manager" icon="key">
+    **Secrets Management**
+    
+    Encrypted secrets with automatic rotation
+  </Card>
+  
+  <Card title="CloudWatch" icon="chart-line">
+    **Monitoring & Logs**
+    
+    Container Insights, logs, and custom metrics
+  </Card>
+  
+  <Card title="WAF" icon="shield">
+    **Web Application Firewall**
+    
+    Protection against OWASP Top 10 vulnerabilities
+  </Card>
+  
+  <Card title="GuardDuty" icon="eye">
+    **Threat Detection**
+    
+    ML-based threat detection and monitoring
+  </Card>
+</CardGroup>
+
+## Service implementations
+
+The AWS service implementations are located in `app/backend/src/services/providers/aws/`:
+
+### StorageService (S3)
+
+```javascript
+// app/backend/src/services/providers/aws/aws-storage.service.js
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
+class AwsStorageService {
+  constructor() {
+    this.client = new S3Client({ region: process.env.AWS_REGION });
+  }
+
+  async uploadFile(bucketName, key, body, contentType) {
+    const command = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      Body: body,
+      ContentType: contentType
+    });
+    return await this.client.send(command);
+  }
+
+  async getSignedUrl(bucketName, key, expiresInSeconds = 3600) {
+    const command = new GetObjectCommand({ Bucket: bucketName, Key: key });
+    return await getSignedUrl(this.client, command, { expiresIn: expiresInSeconds });
+  }
+}
+```
+
+### DatabaseService (RDS)
+
+```javascript
+// app/backend/src/services/providers/aws/aws-database.service.js
+const { Pool } = require('pg');
+
+class AwsDatabaseService {
+  constructor() {
+    this.pool = new Pool({
+      host: process.env.DB_HOST,
+      port: process.env.DB_PORT || 5432,
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      ssl: { rejectUnauthorized: false },
+      max: 20,
+      idleTimeoutMillis: 30000
+    });
+  }
+
+  async query(sql, params = []) {
+    const result = await this.pool.query(sql, params);
+    return { rows: result.rows, rowCount: result.rowCount };
+  }
+
+  async ping() {
+    const start = Date.now();
+    try {
+      await this.pool.query('SELECT 1');
+      return { status: 'healthy', latencyMs: Date.now() - start };
+    } catch (error) {
+      return { status: 'unhealthy', error: error.message };
+    }
+  }
+}
+```
+
+### MonitoringService (CloudWatch)
+
+```javascript
+// app/backend/src/services/providers/aws/aws-monitoring.service.js
+const { CloudWatchClient, PutMetricDataCommand } = require('@aws-sdk/client-cloudwatch');
+
+class AwsMonitoringService {
+  constructor() {
+    this.client = new CloudWatchClient({ region: process.env.AWS_REGION });
+  }
+
+  async putMetric(namespace, metricName, value, unit = 'Count') {
+    const command = new PutMetricDataCommand({
+      Namespace: namespace,
+      MetricData: [{
+        MetricName: metricName,
+        Value: value,
+        Unit: unit,
+        Timestamp: new Date()
+      }]
+    });
+    return await this.client.send(command);
+  }
+}
+```
+
+## Infrastructure as Code
+
+### Terraform modules
+
+The AWS infrastructure is defined in Terraform modules:
+
+```hcl
+# terraform/main.tf
+module "networking" {
+  source = "./modules/networking"
+  vpc_cidr = "10.0.0.0/16"
+  availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+}
+
+module "kubernetes" {
+  source = "./modules/kubernetes-cluster"
+  cluster_name = "govtech-prod"
+  vpc_id = module.networking.vpc_id
+  subnet_ids = module.networking.private_subnet_ids
+}
+
+module "database" {
+  source = "./modules/database"
+  multi_az = true  # High availability
+  subnet_ids = module.networking.private_subnet_ids
+}
+
+module "security" {
+  source = "./modules/security"
+  # Creates: WAF, GuardDuty, KMS, CloudTrail, Security Hub
+}
+```
+
+## Authentication with IRSA
+
+The platform uses **IAM Roles for Service Accounts (IRSA)** for secure, keyless authentication:
+
+<Steps>
+  <Step title="OIDC Provider Setup">
+    Terraform creates an OIDC provider that trusts the EKS cluster:
+    
+    ```hcl
+    resource "aws_iam_openid_connect_provider" "eks" {
+      url = module.kubernetes.cluster_oidc_issuer_url
+      client_id_list = ["sts.amazonaws.com"]
+    }
+    ```
+  </Step>
+  
+  <Step title="IAM Role Creation">
+    Create an IAM role that the Kubernetes service account can assume:
+    
+    ```hcl
+    resource "aws_iam_role" "backend" {
+      name = "govtech-backend"
+      assume_role_policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [{
+          Effect = "Allow"
+          Principal = {
+            Federated = aws_iam_openid_connect_provider.eks.arn
+          }
+          Action = "sts:AssumeRoleWithWebIdentity"
+          Condition = {
+            StringEquals = {
+              "${module.kubernetes.cluster_oidc_issuer}:sub" = "system:serviceaccount:govtech:govtech-backend"
+            }
+          }
+        }]
+      })
+    }
+    ```
+  </Step>
+  
+  <Step title="Service Account Annotation">
+    Annotate the Kubernetes service account with the IAM role ARN:
+    
+    ```yaml
+    # kubernetes/backend/deployment.yaml
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: govtech-backend
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::835960996869:role/govtech-backend
+    ```
+  </Step>
+  
+  <Step title="Automatic Credentials">
+    The AWS SDK automatically uses the IRSA credentials - no keys needed in code!
+    
+    ```javascript
+    // No credentials configuration needed
+    const client = new S3Client({ region: 'us-east-1' });
+    // AWS SDK automatically discovers and uses IRSA credentials
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+IRSA eliminates the need for long-lived AWS access keys, reducing security risks and simplifying credential rotation.
+</Tip>
+
+## Security features
+
+### WAF protection
+
+The AWS WAF is configured with managed rule groups:
+
+```hcl
+# terraform/modules/security/aws.tf
+resource "aws_wafv2_web_acl" "main" {
+  name = "govtech-waf"
+  scope = "REGIONAL"
+  
+  rule {
+    name = "AWSManagedRulesCommonRuleSet"
+    priority = 1
+    override_action { none {} }
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name = "AWSManagedRulesCommonRuleSet"
+      }
+    }
+  }
+}
+```
+
+Protection includes:
+- SQL injection blocking
+- XSS prevention
+- Bot detection
+- Rate limiting (5 requests/second per IP)
+- Geographic blocking (optional)
+
+### GuardDuty
+
+Automated threat detection monitors:
+- Unusual API calls
+- Compromised EC2 instances
+- Reconnaissance activities
+- Cryptocurrency mining
+- Data exfiltration attempts
+
+### CloudTrail
+
+All API calls are logged for audit and forensics:
+
+```bash
+# Query CloudTrail logs
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=DeleteBucket \
+  --max-results 10
+```
+
+## Cost optimization
+
+### Reserved instances
+
+For predictable workloads, use EC2 Reserved Instances:
+
+```bash
+# Save ~40% with 1-year commitment
+aws ec2 purchase-reserved-instances-offering \
+  --reserved-instances-offering-id <offering-id> \
+  --instance-count 3
+```
+
+### Spot instances
+
+Use Spot instances for non-critical workloads:
+
+```hcl
+# terraform/modules/kubernetes-cluster/aws.tf
+resource "aws_eks_node_group" "spot" {
+  capacity_type = "SPOT"
+  instance_types = ["t3.medium", "t3a.medium"]
+  
+  scaling_config {
+    min_size = 1
+    max_size = 5
+    desired_size = 2
+  }
+}
+```
+
+### S3 lifecycle policies
+
+```hcl
+resource "aws_s3_bucket_lifecycle_configuration" "main" {
+  rule {
+    id = "transition-to-glacier"
+    transition {
+      days = 90
+      storage_class = "GLACIER"
+    }
+  }
+}
+```
+
+## Monitoring and alarms
+
+### Container Insights
+
+Enable Container Insights for comprehensive metrics:
+
+```bash
+aws eks update-cluster-config \
+  --name govtech-prod \
+  --logging '{"clusterLogging":[{"types":["api","audit","authenticator"],"enabled":true}]}'
+```
+
+### CloudWatch Alarms
+
+Critical alarms configured:
+- High CPU usage (>80%)
+- Low disk space (&lt;20%)
+- Database connection pool exhaustion
+- Failed health checks
+- API error rate >5%
+
+## Disaster recovery
+
+AWS-specific DR features:
+
+- **RDS automated snapshots**: Daily backups with 7-day retention
+- **Cross-region replication**: S3 objects replicated to `us-west-2`
+- **AMI snapshots**: EC2 node group configurations backed up weekly
+- **CloudFormation drift detection**: Infrastructure compliance checks
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Terraform Reference" icon="code" href="/reference/terraform/networking">
+    Explore Terraform modules
+  </Card>
+  <Card title="Security Guide" icon="shield" href="/security/overview">
+    Learn about security features
+  </Card>
+  <Card title="Migration Guide" icon="shuffle" href="/multicloud/migration-guide">
+    Migrate to another provider
+  </Card>
+  <Card title="Operations" icon="gauge" href="/operations/monitoring">
+    Monitor your infrastructure
+  </Card>
+</CardGroup>

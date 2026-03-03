@@ -1,0 +1,292 @@
+---
+title: RBAC Roles and Bindings
+description: Role-Based Access Control configurations for service accounts and deployments
+---
+
+# RBAC Roles and Bindings
+
+This reference documents the Role-Based Access Control (RBAC) configurations that govern permissions within the Kubernetes cluster.
+
+## Overview
+
+RBAC implements the principle of least privilege by granting each component only the permissions it needs:
+
+- **ServiceAccounts:** Identity for pods and deployments
+- **Roles:** Permissions on resources within a namespace
+- **RoleBindings:** Assign roles to service accounts
+
+## Service Accounts
+
+### Backend Service Account
+
+The backend service account includes IRSA (IAM Role for Service Account) integration for AWS access:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: govtech-backend
+  namespace: govtech
+  labels:
+    app: govtech
+    component: backend
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::835960996869:role/govtech-backend-role
+automountServiceAccountToken: true
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:28-42`
+
+#### Features
+
+- **IRSA Integration:** Annotated with AWS IAM role ARN
+- **Token Mounting:** Enabled for AWS Secrets Manager access
+- **Purpose:** Allows backend to access AWS services without hardcoded credentials
+
+### Frontend Service Account
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: govtech-frontend
+  namespace: govtech
+  labels:
+    app: govtech
+    component: frontend
+automountServiceAccountToken: false
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:45-54`
+
+#### Features
+
+- **No Token:** Service account token not mounted (frontend doesn't need K8s API access)
+- **Minimal Privileges:** No permissions granted
+
+### Database Service Account
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: govtech-database
+  namespace: govtech
+  labels:
+    app: govtech
+    component: database
+automountServiceAccountToken: false
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:57-66`
+
+#### Features
+
+- **No Token:** Database doesn't access Kubernetes API
+- **Isolated:** No permissions on cluster resources
+
+### Deployer Service Account
+
+For CI/CD pipelines (GitHub Actions):
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: govtech-deployer
+  namespace: govtech
+  labels:
+    app: govtech
+    security: rbac
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:147-154`
+
+## Roles
+
+### Backend Role
+
+Grants backend read access to ConfigMaps and Secrets:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: govtech-backend-role
+  namespace: govtech
+  labels:
+    app: govtech
+    component: backend
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+    resourceNames: ["govtech-config"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["govtech-secrets"]
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:75-95`
+
+#### Permissions
+
+| Resource | Verbs | Scope |
+|----------|-------|-------|
+| configmaps | get, list, watch | govtech-config only |
+| secrets | get | govtech-secrets only |
+
+### Deployer Role
+
+Grants CI/CD pipeline deployment permissions:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: govtech-deployer-role
+  namespace: govtech
+  labels:
+    app: govtech
+    security: rbac
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:99-116`
+
+#### Permissions
+
+| Resource | Verbs | Purpose |
+|----------|-------|----------|
+| deployments | get, list, update, patch | Update container images during deployment |
+| pods | get, list, watch | Monitor rollout status |
+| pods/log | get, list, watch | View logs for troubleshooting |
+
+#### Restrictions
+
+- **Cannot delete pods:** Prevents accidental service disruption
+- **Cannot create resources:** Only updates existing deployments
+- **Cannot view secrets:** No access to sensitive data
+
+## Role Bindings
+
+### Backend Role Binding
+
+Binds the backend service account to its role:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: govtech-backend-binding
+  namespace: govtech
+  labels:
+    app: govtech
+    component: backend
+subjects:
+  - kind: ServiceAccount
+    name: govtech-backend
+    namespace: govtech
+roleRef:
+  kind: Role
+  name: govtech-backend-role
+  apiGroup: rbac.authorization.k8s.io
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:127-142`
+
+### Deployer Role Binding
+
+Binds the deployer service account to its role:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: govtech-deployer-binding
+  namespace: govtech
+  labels:
+    app: govtech
+    security: rbac
+subjects:
+  - kind: ServiceAccount
+    name: govtech-deployer
+    namespace: govtech
+roleRef:
+  kind: Role
+  name: govtech-deployer-role
+  apiGroup: rbac.authorization.k8s.io
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:157-172`
+
+## IRSA (IAM Roles for Service Accounts)
+
+The backend service account uses IRSA to access AWS services:
+
+```yaml
+annotations:
+  eks.amazonaws.com/role-arn: arn:aws:iam::835960996869:role/govtech-backend-role
+```
+
+This annotation allows the backend pods to:
+
+- Access AWS Secrets Manager for database credentials
+- Read from S3 buckets
+- Call other AWS APIs
+
+**Without hardcoded access keys in the application code.**
+
+## Permission Verification
+
+Check if a service account can perform an action:
+
+```bash
+# Check if frontend can read secrets (should be "no")
+kubectl auth can-i get secrets \
+  --as=system:serviceaccount:govtech:govtech-frontend \
+  -n govtech
+
+# Check if backend can read configmaps (should be "yes")
+kubectl auth can-i get configmaps \
+  --as=system:serviceaccount:govtech:govtech-backend \
+  -n govtech
+
+# Check if deployer can update deployments (should be "yes")
+kubectl auth can-i update deployments \
+  --as=system:serviceaccount:govtech:govtech-deployer \
+  -n govtech
+```
+
+**Source:** `platform/kubernetes/rbac.yaml:180-185`
+
+## Security Best Practices
+
+1. **Least Privilege:** Each service account has minimal required permissions
+2. **Resource Scoping:** Permissions limited to specific resources (e.g., `resourceNames`)
+3. **Token Mounting:** Disabled where not needed to reduce attack surface
+4. **IRSA over Keys:** Use IAM roles instead of hardcoded AWS credentials
+5. **Namespace Isolation:** Roles are namespace-scoped (not cluster-wide)
+
+## Service Account Usage in Deployments
+
+To use a service account in a deployment:
+
+```yaml
+spec:
+  template:
+    spec:
+      serviceAccountName: govtech-backend
+      containers:
+      - name: backend
+        # ...
+```
+
+The pod inherits all permissions from the assigned service account.

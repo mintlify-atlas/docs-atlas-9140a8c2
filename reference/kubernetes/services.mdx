@@ -1,0 +1,229 @@
+---
+title: Service Definitions
+description: Kubernetes Service configurations for frontend, backend, and database networking
+---
+
+# Service Definitions
+
+This reference documents the Kubernetes Service resources that expose applications within the cluster.
+
+## Frontend Service
+
+The frontend service exposes the React/Nginx application on port 80.
+
+### Configuration
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: govtech
+  labels:
+    app: frontend
+    tier: presentation
+    component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 80
+  sessionAffinity: None
+```
+
+**Source:** `platform/kubernetes/frontend/service.yaml:1-28`
+
+### Service Type
+
+- **Type:** ClusterIP
+- **Access:** Internal cluster only
+- **External Access:** Via Ingress/ALB
+
+### Port Mapping
+
+| Service Port | Target Port | Protocol | Description |
+|--------------|-------------|----------|-------------|
+| 80 | 80 | TCP | HTTP traffic to Nginx |
+
+## Backend Service
+
+The backend service exposes the Node.js API application.
+
+### Configuration
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: govtech
+  labels:
+    app: backend
+    tier: application
+    component: api
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 3000
+  sessionAffinity: None
+```
+
+**Source:** `platform/kubernetes/backend/service.yaml:1-29`
+
+### Service Type
+
+- **Type:** ClusterIP
+- **Access:** Internal cluster only
+- **External Access:** Via Ingress/ALB
+
+### Port Mapping
+
+| Service Port | Target Port | Protocol | Description |
+|--------------|-------------|----------|-------------|
+| 80 | 3000 | TCP | HTTP traffic to Node.js |
+
+The service listens on port 80 but forwards to the container's port 3000 where the Node.js application runs.
+
+## Database Services
+
+PostgreSQL uses two services: a headless service for StatefulSet management and a standard ClusterIP service for application connections.
+
+### Headless Service
+
+Required for StatefulSet DNS resolution:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: govtech
+  labels:
+    app: postgres
+    tier: database
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+```
+
+**Source:** `platform/kubernetes/database/service.yaml:20-44`
+
+### ClusterIP Service
+
+For backend application connections:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: govtech
+  labels:
+    app: postgres
+    tier: database
+  annotations:
+    description: "Service para que el backend se conecte a PostgreSQL"
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+```
+
+**Source:** `platform/kubernetes/database/service.yaml:49-70`
+
+### DNS Resolution
+
+The headless service creates individual DNS records for each pod:
+
+```
+postgres-0.postgres.govtech.svc.cluster.local
+```
+
+The ClusterIP service provides a stable connection point:
+
+```
+postgres-service.govtech.svc.cluster.local:5432
+```
+
+### Port Mapping
+
+| Service Port | Target Port | Protocol | Description |
+|--------------|-------------|----------|-------------|
+| 5432 | 5432 | TCP | PostgreSQL connections |
+
+## Service Discovery
+
+All services can be accessed using Kubernetes DNS:
+
+### Within Same Namespace
+
+```
+frontend-service
+backend-service
+postgres-service
+```
+
+### Fully Qualified Domain Names
+
+```
+frontend-service.govtech.svc.cluster.local
+backend-service.govtech.svc.cluster.local
+postgres-service.govtech.svc.cluster.local
+```
+
+## Load Balancing
+
+All services use round-robin load balancing (`sessionAffinity: None`) to distribute traffic evenly across available pods.
+
+## Service Endpoints
+
+Services automatically track healthy pod endpoints using:
+
+- Pod selector labels (e.g., `app: backend`)
+- Readiness probe status
+- Pod lifecycle state
+
+Only ready pods receive traffic from the service.
+
+## Connection Flow
+
+```
+Internet
+  ↓
+AWS ALB (Ingress)
+  ↓
+frontend-service:80 → frontend pods:80
+  ↓
+backend-service:80 → backend pods:3000
+  ↓
+postgres-service:5432 → postgres-0:5432
+```
+
+## Service Types
+
+| Type | Use Case | Accessibility |
+|------|----------|---------------|
+| ClusterIP | Internal services | Cluster only |
+| Headless | StatefulSet pods | DNS per pod |
+| LoadBalancer | External access | Public (via Ingress) |

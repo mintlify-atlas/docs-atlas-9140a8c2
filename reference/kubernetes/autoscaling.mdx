@@ -1,0 +1,362 @@
+---
+title: Autoscaling Configurations
+description: Horizontal Pod Autoscaler (HPA) and Pod Disruption Budget (PDB) configurations
+---
+
+# Autoscaling Configurations
+
+This reference documents the autoscaling and availability configurations that ensure the platform scales efficiently and maintains high availability.
+
+## Horizontal Pod Autoscaler (HPA)
+
+HPA automatically scales the number of pods based on CPU and memory utilization.
+
+### Backend HPA
+
+The backend autoscaler maintains API responsiveness under varying load:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: govtech
+  labels:
+    app: backend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+```
+
+**Source:** `platform/kubernetes/backend/hpa.yaml:17-32`
+
+#### Scaling Metrics
+
+```yaml
+metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+**Source:** `platform/kubernetes/backend/hpa.yaml:35-59`
+
+| Metric | Target | Behavior |
+|--------|--------|----------|
+| CPU | 70% average | Scale up when sustained CPU usage exceeds 70% |
+| Memory | 80% average | Scale up when sustained memory usage exceeds 80% |
+
+#### Scaling Behavior
+
+**Scale Up Policy:**
+
+```yaml
+scaleUp:
+  stabilizationWindowSeconds: 60
+  policies:
+    - type: Pods
+      value: 2
+      periodSeconds: 60
+    - type: Percent
+      value: 50
+      periodSeconds: 60
+  selectPolicy: Max
+```
+
+**Source:** `platform/kubernetes/backend/hpa.yaml:66-76`
+
+- **Stabilization:** Wait 60 seconds to confirm increased load
+- **Max Pods:** Add up to 2 pods at once
+- **Max Percent:** Scale up by 50% per cycle
+- **Policy:** Use whichever adds more pods (aggressive scale-up)
+
+**Scale Down Policy:**
+
+```yaml
+scaleDown:
+  stabilizationWindowSeconds: 300
+  policies:
+    - type: Pods
+      value: 1
+      periodSeconds: 120
+  selectPolicy: Min
+```
+
+**Source:** `platform/kubernetes/backend/hpa.yaml:78-85`
+
+- **Stabilization:** Wait 5 minutes (300s) to confirm decreased load
+- **Max Pods:** Remove only 1 pod at a time
+- **Period:** Wait 2 minutes between scale-down events
+- **Policy:** Conservative scale-down to prevent thrashing
+
+### Frontend HPA
+
+The frontend autoscaler handles web traffic spikes:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend-hpa
+  namespace: govtech
+  labels:
+    app: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2
+  maxReplicas: 8
+```
+
+**Source:** `platform/kubernetes/frontend/hpa.yaml:15-29`
+
+#### Scaling Metrics
+
+```yaml
+metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 85
+```
+
+**Source:** `platform/kubernetes/frontend/hpa.yaml:31-44`
+
+| Metric | Target | Rationale |
+|--------|--------|----------|
+| CPU | 80% average | Nginx is efficient; higher threshold acceptable |
+| Memory | 85% average | Static files use stable memory |
+
+The frontend uses higher thresholds because Nginx serving static files is very efficient and can handle high load with minimal resources.
+
+#### Scaling Behavior
+
+**Scale Up Policy:**
+
+```yaml
+scaleUp:
+  stabilizationWindowSeconds: 30
+  policies:
+    - type: Pods
+      value: 2
+      periodSeconds: 60
+    - type: Percent
+      value: 100
+      periodSeconds: 60
+  selectPolicy: Max
+```
+
+**Source:** `platform/kubernetes/frontend/hpa.yaml:47-56`
+
+- **Stabilization:** 30 seconds (faster than backend)
+- **Can double:** 100% increase if needed
+- **Stateless:** Safe to scale aggressively
+
+**Scale Down Policy:**
+
+```yaml
+scaleDown:
+  stabilizationWindowSeconds: 120
+  policies:
+    - type: Pods
+      value: 2
+      periodSeconds: 60
+  selectPolicy: Min
+```
+
+**Source:** `platform/kubernetes/frontend/hpa.yaml:59-65`
+
+- **Stabilization:** 2 minutes (faster than backend's 5 minutes)
+- **Remove up to 2 pods:** Frontend is stateless, safer to scale down faster
+
+## Pod Disruption Budgets (PDB)
+
+PDBs ensure availability during voluntary disruptions (node drains, cluster upgrades).
+
+### Backend PDB
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend-pdb
+  namespace: govtech
+  labels:
+    app: govtech
+    component: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: backend
+```
+
+**Source:** `platform/kubernetes/pdb.yaml:29-43`
+
+**Guarantee:** At least 1 backend pod must remain available during voluntary disruptions.
+
+With `minReplicas: 2` in HPA, this ensures:
+- During maintenance, Kubernetes won't drain both backend pods simultaneously
+- API remains available during node replacements
+- Rolling updates proceed safely
+
+### Frontend PDB
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-pdb
+  namespace: govtech
+  labels:
+    app: govtech
+    component: frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend
+```
+
+**Source:** `platform/kubernetes/pdb.yaml:49-61`
+
+**Guarantee:** At least 1 frontend pod must remain available during voluntary disruptions.
+
+### Database PDB
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: database-pdb
+  namespace: govtech
+  labels:
+    app: govtech
+    component: database
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgres
+```
+
+**Source:** `platform/kubernetes/pdb.yaml:71-83`
+
+**Guarantee:** The single PostgreSQL pod cannot be voluntarily disrupted.
+
+**Important:** With only 1 replica in the StatefulSet:
+- `ALLOWED DISRUPTIONS: 0` when viewing PDB status
+- Database cannot be drained during maintenance without manual intervention
+- In production, use managed RDS instead of PostgreSQL in Kubernetes
+
+## Autoscaling Formula
+
+HPA calculates desired replicas using:
+
+```
+desiredReplicas = ceil(currentReplicas × (currentMetric / targetMetric))
+```
+
+### Example: Backend Scaling
+
+**Current State:**
+- Current replicas: 2
+- Current CPU usage: 85%
+- Target CPU: 70%
+
+**Calculation:**
+```
+desiredReplicas = ceil(2 × (85 / 70))
+                = ceil(2 × 1.214)
+                = ceil(2.428)
+                = 3 pods
+```
+
+HPA will scale from 2 to 3 pods.
+
+## Scaling Limits
+
+| Component | Min Replicas | Max Replicas | Reason |
+|-----------|--------------|--------------|--------|
+| Backend | 2 | 10 | API availability and cost balance |
+| Frontend | 2 | 8 | Nginx efficiency allows fewer replicas |
+| Database | 1 | 1 | StatefulSet (use managed RDS in production) |
+
+## Monitoring Autoscaling
+
+View HPA status:
+
+```bash
+kubectl get hpa -n govtech
+```
+
+Example output:
+```
+NAME           REFERENCE             TARGETS           MINPODS   MAXPODS   REPLICAS   AGE
+backend-hpa    Deployment/backend    45%/70%, 60%/80%  2         10        3          5m
+frontend-hpa   Deployment/frontend   30%/80%, 40%/85%  2         8         2          5m
+```
+
+View PDB status:
+
+```bash
+kubectl get pdb -n govtech
+```
+
+Example output:
+```
+NAME            MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+backend-pdb     1               N/A               2                     5m
+frontend-pdb    1               N/A               1                     5m
+database-pdb    1               N/A               0                     5m
+```
+
+## Best Practices
+
+1. **Set Requests and Limits:** HPA requires resource requests to calculate utilization
+2. **Conservative Targets:** Leave headroom (70-80%) before saturation
+3. **Slow Scale Down:** Prevent thrashing from temporary load decreases
+4. **Fast Scale Up:** Respond quickly to increased demand
+5. **PDB Protection:** Always set PDBs to maintain availability during maintenance
+6. **Monitor Metrics:** Use Prometheus/Grafana to observe scaling behavior
+
+## Integration with Deployment
+
+HPA works with deployment resource requests:
+
+```yaml
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"  # HPA calculates % based on this value
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+```
+
+If a pod uses 175m CPU with a 250m request:
+- Utilization = 175 / 250 = 70%
+- HPA sees 70% utilization

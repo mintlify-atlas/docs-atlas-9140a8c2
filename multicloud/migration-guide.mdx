@@ -1,0 +1,483 @@
+---
+title: Migration guide
+description: Step-by-step guide to migrate between cloud providers
+---
+
+This guide walks you through the process of migrating your GovTech platform deployment from one cloud provider to another. The platform's cloud-agnostic architecture makes this process straightforward.
+
+## Migration overview
+
+Migrating between cloud providers involves:
+
+1. Preparing infrastructure in the destination cloud
+2. Migrating data (storage and database)
+3. Implementing provider-specific services
+4. Testing the new deployment
+5. Switching traffic to the new provider
+
+<Info>
+**Estimated migration time:** 1-2 weeks for a complete migration, including testing and validation.
+</Info>
+
+## What changes vs what stays the same
+
+<CardGroup cols={2}>
+  <Card title="Unchanged" icon="check" color="#16a34a">
+    - Application code (Node.js/React)
+    - Database schema
+    - Kubernetes manifests (mostly)
+    - CI/CD pipeline logic
+    - Security policies
+    - Business logic
+  </Card>
+  
+  <Card title="Changes Required" icon="wrench" color="#ea580c">
+    - Environment variables
+    - Terraform modules
+    - Service implementations (4 files)
+    - Container registry
+    - Monitoring dashboards
+    - DNS configuration
+  </Card>
+</CardGroup>
+
+## Step-by-step migration process
+
+<Steps>
+  <Step title="Prepare destination infrastructure">
+    Create the infrastructure in your destination cloud using Terraform:
+    
+    ```bash
+    # Example: Migrating from AWS to OCI
+    cd terraform/oci/
+    terraform init
+    terraform plan -var="environment=prod"
+    terraform apply
+    ```
+    
+    This creates:
+    - VPC/VCN and networking
+    - Kubernetes cluster (OKE/GKE/AKS)
+    - Database instance
+    - Storage buckets/containers
+    - Security controls
+  </Step>
+  
+  <Step title="Migrate storage data">
+    Transfer files from source to destination storage:
+    
+    <Tabs>
+      <Tab title="Using rclone">
+        ```bash
+        # Install rclone
+        curl https://rclone.org/install.sh | sudo bash
+        
+        # Configure source and destination
+        rclone config
+        
+        # Sync data (AWS S3 → OCI Object Storage)
+        rclone sync s3:govtech-documents oci:govtech-documents \
+          --progress \
+          --transfers 10
+        
+        # Verify
+        rclone check s3:govtech-documents oci:govtech-documents
+        ```
+      </Tab>
+      
+      <Tab title="Using cloud CLIs">
+        ```bash
+        # AWS → GCP example
+        # 1. Download from S3
+        aws s3 sync s3://govtech-documents ./temp-backup
+        
+        # 2. Upload to GCS
+        gsutil -m rsync -r ./temp-backup gs://govtech-documents
+        
+        # 3. Clean up
+        rm -rf ./temp-backup
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  
+  <Step title="Migrate database">
+    Export from source database and import to destination:
+    
+    ```bash
+    # Export from AWS RDS
+    pg_dump -h govtech-prod.xxxx.us-east-1.rds.amazonaws.com \
+      -U adminuser \
+      -d govtech_prod \
+      --no-owner \
+      --no-acl \
+      -F c \
+      -f govtech_backup.dump
+    
+    # Import to OCI Database
+    pg_restore -h govtech-db.xxx.oraclecloud.com \
+      -U adminuser \
+      -d govtech_prod \
+      --no-owner \
+      --no-acl \
+      govtech_backup.dump
+    
+    # Verify data
+    psql -h govtech-db.xxx.oraclecloud.com \
+      -U adminuser \
+      -d govtech_prod \
+      -c "SELECT COUNT(*) FROM users;"
+    ```
+    
+    <Warning>
+    **Downtime required:** Database migration requires a maintenance window. Plan for 2-4 hours depending on database size.
+    </Warning>
+  </Step>
+  
+  <Step title="Implement provider services">
+    Create the 4 service implementation files for your destination provider:
+    
+    ```bash
+    # Example: OCI implementation
+    mkdir -p app/backend/src/services/providers/oci
+    
+    # Create these files:
+    touch app/backend/src/services/providers/oci/oci-storage.service.js
+    touch app/backend/src/services/providers/oci/oci-database.service.js
+    touch app/backend/src/services/providers/oci/oci-monitoring.service.js
+    touch app/backend/src/services/providers/oci/oci-auth.service.js
+    ```
+    
+    See the provider-specific implementation guides:
+    - [OCI Implementation](/multicloud/oci-implementation)
+    - [GCP Implementation](/multicloud/gcp-implementation)
+    - [Azure Implementation](/multicloud/azure-implementation)
+  </Step>
+  
+  <Step title="Update environment variables">
+    Update your `.env` file with destination provider credentials:
+    
+    ```env .env
+    # Change provider
+    CLOUD_PROVIDER=oci
+    
+    # OCI-specific variables
+    OCI_REGION=us-ashburn-1
+    OCI_TENANCY_ID=ocid1.tenancy.oc1..xxx
+    OCI_USER_ID=ocid1.user.oc1..xxx
+    OCI_FINGERPRINT=xx:xx:xx:xx
+    OCI_PRIVATE_KEY_PATH=/secrets/oci-private-key.pem
+    OCI_NAMESPACE=govtech-namespace
+    
+    # Database endpoint (new)
+    DB_HOST=govtech-db.xxx.oraclecloud.com
+    DB_PORT=5432
+    DB_NAME=govtech_prod
+    ```
+  </Step>
+  
+  <Step title="Update container registry">
+    Build and push images to the new registry:
+    
+    ```bash
+    # OCI example
+    docker build -t iad.ocir.io/tenancy/govtech-backend:v1.0 app/backend/
+    docker build -t iad.ocir.io/tenancy/govtech-frontend:v1.0 app/frontend/
+    
+    # Login to OCIR
+    docker login iad.ocir.io
+    
+    # Push images
+    docker push iad.ocir.io/tenancy/govtech-backend:v1.0
+    docker push iad.ocir.io/tenancy/govtech-frontend:v1.0
+    ```
+    
+    Update Kubernetes deployments with new image URLs:
+    
+    ```yaml
+    # kubernetes/backend/deployment.yaml
+    spec:
+      containers:
+      - name: backend
+        image: iad.ocir.io/tenancy/govtech-backend:v1.0
+    ```
+  </Step>
+  
+  <Step title="Test in staging">
+    Deploy to a staging environment first:
+    
+    ```bash
+    # Deploy to staging namespace
+    kubectl config use-context govtech-staging
+    kubectl apply -f kubernetes/
+    
+    # Run health checks
+    kubectl get pods -n govtech
+    kubectl logs -f deployment/govtech-backend -n govtech
+    
+    # Test endpoints
+    curl https://staging.govtech.example.com/api/health
+    curl https://staging.govtech.example.com/api/health/database
+    curl https://staging.govtech.example.com/api/health/cloud
+    ```
+    
+    Run integration tests:
+    
+    ```bash
+    npm run test:integration
+    npm run test:e2e
+    ```
+  </Step>
+  
+  <Step title="Update DNS and switch traffic">
+    When ready for production, update DNS to point to the new load balancer:
+    
+    <Tabs>
+      <Tab title="Blue-Green">
+        ```bash
+        # Keep both environments running
+        # Gradually shift traffic using weighted DNS records
+        
+        # AWS Route 53 example
+        aws route53 change-resource-record-sets \
+          --hosted-zone-id Z123456 \
+          --change-batch '{
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "app.govtech.com",
+                "Type": "A",
+                "SetIdentifier": "OCI-Production",
+                "Weight": 100,
+                "AliasTarget": {
+                  "HostedZoneId": "Z789",
+                  "DNSName": "oci-lb.example.com"
+                }
+              }
+            }]
+          }'
+        ```
+      </Tab>
+      
+      <Tab title="Cutover">
+        ```bash
+        # Direct cutover approach
+        # Update DNS A record to point to new load balancer
+        
+        # 1. Lower TTL beforehand
+        # 2. Update record
+        # 3. Monitor for issues
+        # 4. Keep old environment for 24h as fallback
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  
+  <Step title="Monitor and validate">
+    After migration, monitor key metrics:
+    
+    ```bash
+    # Check pod status
+    kubectl get pods -n govtech
+    
+    # Monitor logs
+    kubectl logs -f deployment/govtech-backend -n govtech
+    
+    # Check resource usage
+    kubectl top nodes
+    kubectl top pods -n govtech
+    
+    # Application metrics
+    curl https://app.govtech.com/api/metrics
+    ```
+    
+    Monitor for:
+    - API response times
+    - Error rates
+    - Database connection pool
+    - Storage access latency
+    - Cost metrics
+  </Step>
+  
+  <Step title="Decommission old infrastructure">
+    After 7-30 days of stable operation:
+    
+    ```bash
+    # Stop resources in old provider
+    cd terraform/aws/
+    
+    # Review what will be destroyed
+    terraform plan -destroy
+    
+    # Destroy infrastructure
+    terraform destroy
+    ```
+    
+    <Warning>
+    **Keep backups!** Maintain database and storage backups from the old provider for at least 90 days before final deletion.
+    </Warning>
+  </Step>
+</Steps>
+
+## Rollback plan
+
+If issues occur during migration:
+
+<Accordion title="Emergency rollback procedure">
+  1. **Immediate DNS revert**
+     ```bash
+     # Point DNS back to original provider
+     # Changes propagate within TTL (typically 5-60 minutes)
+     ```
+  
+  2. **Database rollback**
+     ```bash
+     # If data was modified in new environment:
+     # Restore from backup taken before migration
+     pg_restore -h original-db.rds.amazonaws.com \
+       -d govtech_prod \
+       pre-migration-backup.dump
+     ```
+  
+  3. **Communication**
+     - Notify users of the incident
+     - Document the issue
+     - Schedule post-mortem
+  
+  4. **Investigation**
+     - Identify root cause
+     - Fix issues
+     - Re-plan migration
+</Accordion>
+
+## Migration checklist
+
+Use this checklist to track your migration:
+
+- [ ] Destination infrastructure created and validated
+- [ ] Storage data migrated and verified
+- [ ] Database exported and imported successfully
+- [ ] Service implementations completed for new provider
+- [ ] Environment variables updated
+- [ ] Container images built and pushed to new registry
+- [ ] Kubernetes manifests updated with new image URLs
+- [ ] Staging deployment successful
+- [ ] Integration tests passing
+- [ ] Performance tests show acceptable metrics
+- [ ] Security scan completed on new infrastructure
+- [ ] Monitoring and alerting configured
+- [ ] Disaster recovery tested
+- [ ] DNS cutover plan documented
+- [ ] Rollback procedure documented and tested
+- [ ] Team trained on new provider
+- [ ] Stakeholders notified of migration schedule
+- [ ] Production cutover completed
+- [ ] Post-migration monitoring (7 days)
+- [ ] Old infrastructure decommissioned
+
+## Cost optimization during migration
+
+Minimize costs during migration:
+
+1. **Parallel running period:** Keep both environments for 7-14 days only
+2. **Use smaller instances:** Start with minimal resources, scale up as needed
+3. **Reserved instances:** Don't buy reserved capacity until after successful migration
+4. **Data transfer:** Use cloud provider's data transfer services (AWS Snowball, Azure Data Box) for large datasets
+5. **Off-peak migration:** Schedule data transfer during off-peak hours for lower network costs
+
+## Common migration scenarios
+
+<Tabs>
+  <Tab title="AWS → OCI">
+    **Why migrate:** Lower compute costs (20% savings), Oracle database compatibility
+    
+    **Timeline:** 1-2 weeks
+    
+    **Key considerations:**
+    - OCI compartments vs AWS accounts
+    - OCI's unique OCID system
+    - Different IAM model
+  </Tab>
+  
+  <Tab title="AWS → GCP">
+    **Why migrate:** Better BigQuery integration, competitive pricing
+    
+    **Timeline:** 1-2 weeks
+    
+    **Key considerations:**
+    - Workload Identity vs IRSA
+    - Different monitoring (Stackdriver)
+    - GKE Autopilot option
+  </Tab>
+  
+  <Tab title="AWS → Azure">
+    **Why migrate:** Enterprise Agreement discounts, Active Directory integration
+    
+    **Timeline:** 1-2 weeks
+    
+    **Key considerations:**
+    - Managed Identity vs IRSA
+    - Azure Resource Manager
+    - Different naming conventions
+  </Tab>
+</Tabs>
+
+## Troubleshooting
+
+<Accordion title="Service implementation errors">
+  **Symptom:** Application fails to start with "Provider 'oci' not implemented"
+  
+  **Solution:**
+  1. Verify all 4 service files exist
+  2. Check Factory uncommented the provider
+  3. Verify `CLOUD_PROVIDER` environment variable is set
+  4. Check SDK dependencies are installed
+</Accordion>
+
+<Accordion title="Authentication failures">
+  **Symptom:** "Access denied" or "Unauthorized" errors
+  
+  **Solution:**
+  1. Verify credentials in environment variables
+  2. Check service account has necessary permissions
+  3. For Kubernetes: verify workload identity/managed identity setup
+  4. Review IAM policies in destination cloud
+</Accordion>
+
+<Accordion title="Database connection issues">
+  **Symptom:** "Connection refused" or timeout errors
+  
+  **Solution:**
+  1. Verify security group/firewall rules allow traffic
+  2. Check database is in same VPC/VCN as application
+  3. Verify database endpoint URL is correct
+  4. Test connection from a debug pod: `kubectl run -it --rm debug --image=postgres -- psql -h $DB_HOST -U $DB_USER`
+</Accordion>
+
+<Accordion title="Performance degradation">
+  **Symptom:** Slower response times after migration
+  
+  **Solution:**
+  1. Check instance sizes match or exceed original
+  2. Verify database connection pooling configured
+  3. Check for network latency between components
+  4. Review storage IOPS limits
+  5. Enable provider-specific caching (CloudFront → Cloud CDN)
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Provider Comparison" icon="scale-balanced" href="/multicloud/provider-comparison">
+    Compare cloud providers
+  </Card>
+  <Card title="AWS Implementation" icon="aws" href="/multicloud/aws-implementation">
+    AWS-specific details
+  </Card>
+  <Card title="Disaster Recovery" icon="life-ring" href="/operations/disaster-recovery">
+    DR planning and procedures
+  </Card>
+  <Card title="Operations Guide" icon="gauge" href="/operations/monitoring">
+    Monitor and operate
+  </Card>
+</CardGroup>

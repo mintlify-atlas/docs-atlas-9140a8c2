@@ -1,0 +1,211 @@
+---
+title: Networking Module
+description: VPC, subnets, gateways, and security groups for network infrastructure
+---
+
+The networking module creates the foundational network infrastructure for the GovTech platform, including VPC, public and private subnets, internet and NAT gateways, and security groups.
+
+## Architecture
+
+The module creates a multi-AZ network architecture:
+
+```
+Internet
+   |
+[Internet Gateway]
+   |
+[Public Subnets]  <- Load Balancers, NAT Gateways
+   |
+[NAT Gateways]    <- Provides internet access for private subnets
+   |
+[Private Subnets] <- EKS Nodes, RDS (not accessible from internet)
+```
+
+## Resources Created
+
+### VPC (Virtual Private Cloud)
+- **Resource**: `aws_vpc.main`
+- Isolated virtual network with DNS hostnames and support enabled
+- Default CIDR: `10.0.0.0/16` (65,536 IP addresses)
+
+### Public Subnets
+- **Resource**: `aws_subnet.public`
+- One subnet per availability zone
+- Auto-assigns public IPs to instances
+- Used for: Load Balancers, NAT Gateways
+- Tagged for EKS Load Balancer Controller discovery
+
+### Private Subnets
+- **Resource**: `aws_subnet.private`
+- One subnet per availability zone
+- No public IP assignment
+- Used for: EKS worker nodes, RDS instances, application pods
+- Tagged for EKS internal load balancers
+
+### Internet Gateway
+- **Resource**: `aws_internet_gateway.main`
+- Provides internet connectivity for public subnets
+
+### NAT Gateways
+- **Resource**: `aws_nat_gateway.main`
+- One per availability zone for high availability
+- Elastic IPs (`aws_eip.nat`) for static public addresses
+- Enables outbound internet access from private subnets
+- **Cost**: ~$32/month per NAT Gateway + data transfer
+
+### Route Tables
+- **Public Route Table**: `aws_route_table.public`
+  - Routes all traffic (`0.0.0.0/0`) to Internet Gateway
+  - Shared across all public subnets
+
+- **Private Route Tables**: `aws_route_table.private`
+  - One per availability zone
+  - Routes external traffic to corresponding NAT Gateway
+  - Isolated failure domains
+
+### Security Groups
+
+#### EKS Cluster Security Group
+- **Resource**: `aws_security_group.eks_cluster`
+- **Ingress Rules**:
+  - HTTPS (443) from anywhere - API server and application traffic
+  - HTTP (80) from anywhere - redirects to HTTPS
+  - All protocols from self - inter-node communication
+- **Egress Rules**:
+  - All traffic to anywhere - updates, ECR, AWS APIs
+
+#### RDS Security Group
+- **Resource**: `aws_security_group.rds`
+- **Ingress Rules**:
+  - PostgreSQL (5432) from EKS security group only
+- **Egress Rules**:
+  - All traffic allowed
+- Ensures database is only accessible from cluster
+
+## Variables
+
+<ParamField path="environment" type="string" required>
+  Deployment environment: `dev`, `staging`, or `prod`
+</ParamField>
+
+<ParamField path="region" type="string" default="us-east-1">
+  AWS region for resource deployment
+</ParamField>
+
+<ParamField path="vpc_cidr" type="string" default="10.0.0.0/16">
+  CIDR block for the VPC. Default provides 65,536 IP addresses.
+</ParamField>
+
+<ParamField path="availability_zones" type="list(string)" default='["us-east-1a", "us-east-1b", "us-east-1c"]'>
+  List of availability zones to use. Determines the number of subnets and NAT gateways created.
+</ParamField>
+
+<ParamField path="public_subnet_cidrs" type="list(string)" default='["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]'>
+  CIDR blocks for public subnets (one per AZ). Each provides 256 IP addresses.
+</ParamField>
+
+<ParamField path="private_subnet_cidrs" type="list(string)" default='["10.0.10.0/24", "10.0.11.0/24", "10.0.12.0/24"]'>
+  CIDR blocks for private subnets (one per AZ). Each provides 256 IP addresses.
+</ParamField>
+
+<ParamField path="project_name" type="string" default="govtech">
+  Project name used for resource tagging and naming
+</ParamField>
+
+## Outputs
+
+<ParamField path="vpc_id" type="string">
+  ID of the created VPC
+</ParamField>
+
+<ParamField path="vpc_cidr" type="string">
+  CIDR block of the VPC
+</ParamField>
+
+<ParamField path="public_subnet_ids" type="list(string)">
+  IDs of public subnets for Load Balancers and NAT Gateways
+</ParamField>
+
+<ParamField path="private_subnet_ids" type="list(string)">
+  IDs of private subnets for EKS nodes and RDS instances
+</ParamField>
+
+<ParamField path="internet_gateway_id" type="string">
+  ID of the Internet Gateway
+</ParamField>
+
+<ParamField path="nat_gateway_ids" type="list(string)">
+  IDs of NAT Gateways (one per AZ)
+</ParamField>
+
+<ParamField path="eks_security_group_id" type="string">
+  ID of the security group for EKS cluster
+</ParamField>
+
+<ParamField path="rds_security_group_id" type="string">
+  ID of the security group for RDS instances
+</ParamField>
+
+## Usage Example
+
+```hcl
+module "networking" {
+  source = "./modules/networking"
+
+  environment        = "prod"
+  region            = "us-east-1"
+  vpc_cidr          = "10.0.0.0/16"
+  availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  
+  public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  private_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24", "10.0.12.0/24"]
+  
+  project_name = "govtech"
+}
+
+# Use outputs in other modules
+module "kubernetes_cluster" {
+  source = "./modules/kubernetes-cluster"
+  
+  vpc_id     = module.networking.vpc_id
+  subnet_ids = module.networking.private_subnet_ids
+  # ...
+}
+```
+
+## Best Practices
+
+### Multi-AZ Deployment
+Deploy across multiple availability zones for high availability. If one AZ fails, services in other AZs continue operating.
+
+### Private Subnet Isolation
+EKS worker nodes and RDS instances run in private subnets without direct internet access. This prevents unauthorized external access while allowing outbound connectivity through NAT gateways.
+
+### Cost Optimization
+For development environments, consider using a single NAT Gateway instead of one per AZ:
+
+```hcl
+availability_zones = ["us-east-1a"]  # Single AZ for dev
+```
+
+This reduces monthly NAT Gateway costs from ~$96 to ~$32.
+
+### Kubernetes Integration
+Subnets are automatically tagged for AWS Load Balancer Controller discovery:
+- `kubernetes.io/role/elb = 1` on public subnets
+- `kubernetes.io/role/internal-elb = 1` on private subnets
+- `kubernetes.io/cluster/<cluster-name> = shared`
+
+## Security Considerations
+
+### Network Segmentation
+Public and private subnets provide network segmentation. Application workloads in private subnets are not directly accessible from the internet.
+
+### Security Group Rules
+Security groups implement defense in depth:
+- RDS only accepts connections from EKS security group
+- EKS allows HTTPS/HTTP from internet (for application access)
+- All inter-node communication allowed within cluster
+
+### VPC Flow Logs
+Consider enabling VPC Flow Logs for network traffic analysis and security monitoring (configured separately).

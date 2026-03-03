@@ -1,0 +1,423 @@
+---
+title: OCI implementation
+description: Oracle Cloud Infrastructure implementation guide for the GovTech platform
+---
+
+This guide shows how to implement the GovTech platform on Oracle Cloud Infrastructure (OCI). The service interfaces are already defined - you just need to implement the OCI-specific code.
+
+<Note>
+**Status:** Structure ready. Implementation time: 3-4 days.
+
+All service interfaces are defined and the Factory pattern is in place. You only need to implement the 4 service classes for OCI.
+</Note>
+
+## OCI services mapping
+
+| Platform Service | OCI Service | SDK Package |
+|---|---|---|
+| StorageService | Object Storage | `oci-objectstorage` |
+| DatabaseService | DB System (PostgreSQL) | `oci-database` |
+| MonitoringService | Monitoring Service | `oci-monitoring` |
+| AuthService | Identity & Access Management | `oci-identity` |
+| Kubernetes | Oracle Kubernetes Engine (OKE) | `oci-containerengine` |
+| Container Registry | OCI Registry (OCIR) | `oci-artifacts` |
+| Secrets | Vault Service | `oci-vault` |
+
+## Implementation steps
+
+<Steps>
+  <Step title="Install OCI SDK">
+    Install the Oracle Cloud Infrastructure SDK:
+    
+    ```bash npm
+    npm install oci-sdk
+    ```
+    
+    The SDK requires Node.js 14 or higher.
+  </Step>
+  
+  <Step title="Configure OCI credentials">
+    Create OCI configuration file:
+    
+    ```ini ~/.oci/config
+    [DEFAULT]
+    user=ocid1.user.oc1..xxx
+    fingerprint=xx:xx:xx:xx:xx
+    tenancy=ocid1.tenancy.oc1..xxx
+    region=us-ashburn-1
+    key_file=/home/user/.oci/private-key.pem
+    ```
+    
+    Or use environment variables:
+    
+    ```env
+    OCI_TENANCY_ID=ocid1.tenancy.oc1..xxx
+    OCI_USER_ID=ocid1.user.oc1..xxx
+    OCI_FINGERPRINT=xx:xx:xx:xx
+    OCI_PRIVATE_KEY_PATH=/secrets/oci-private-key.pem
+    OCI_REGION=us-ashburn-1
+    OCI_NAMESPACE=govtech-namespace
+    ```
+  </Step>
+  
+  <Step title="Implement service classes">
+    Create the 4 service implementation files in `app/backend/src/services/providers/oci/`:
+    
+    - `oci-storage.service.js`
+    - `oci-database.service.js`
+    - `oci-monitoring.service.js`
+    - `oci-auth.service.js`
+  </Step>
+  
+  <Step title="Update the Factory">
+    Uncomment the OCI section in `src/services/factory.js`:
+    
+    ```javascript
+    const PROVIDERS = {
+      aws: { /* ... */ },
+      oci: {
+        storage:    () => new OciStorageService(),
+        database:   () => new OciDatabaseService(),
+        monitoring: () => new OciMonitoringService(),
+        auth:       () => new OciAuthService(),
+      },
+    };
+    ```
+  </Step>
+  
+  <Step title="Set CLOUD_PROVIDER">
+    Update your `.env` file:
+    
+    ```env
+    CLOUD_PROVIDER=oci
+    ```
+  </Step>
+</Steps>
+
+## StorageService implementation
+
+Here's the complete implementation for OCI Object Storage:
+
+```javascript oci-storage.service.js
+// app/backend/src/services/providers/oci/oci-storage.service.js
+const oci = require('oci-sdk');
+
+class OciStorageService {
+  constructor() {
+    // OCI uses config file (~/.oci/config) or environment variables
+    this.provider = new oci.common.ConfigFileAuthenticationDetailsProvider();
+    this.client = new oci.objectstorage.ObjectStorageClient({
+      authenticationDetailsProvider: this.provider,
+    });
+    this.namespace = process.env.OCI_NAMESPACE;
+  }
+
+  async uploadFile(bucketName, key, body, contentType) {
+    const request = {
+      namespaceName: this.namespace,
+      bucketName,
+      objectName: key,
+      putObjectBody: body,
+      contentType,
+    };
+    return await this.client.putObject(request);
+  }
+
+  async downloadFile(bucketName, key) {
+    const request = {
+      namespaceName: this.namespace,
+      bucketName,
+      objectName: key,
+    };
+    const response = await this.client.getObject(request);
+    return response.value; // Buffer with file content
+  }
+
+  async deleteFile(bucketName, key) {
+    const request = {
+      namespaceName: this.namespace,
+      bucketName,
+      objectName: key,
+    };
+    return await this.client.deleteObject(request);
+  }
+
+  async listFiles(bucketName, prefix = '') {
+    const request = {
+      namespaceName: this.namespace,
+      bucketName,
+      prefix,
+    };
+    const response = await this.client.listObjects(request);
+    return response.listObjects.objects.map(obj => ({
+      key: obj.name,
+      size: obj.size,
+      lastModified: obj.timeModified,
+    }));
+  }
+
+  async getSignedUrl(bucketName, key, expiresInSeconds = 3600) {
+    // In OCI, these are called "Pre-Authenticated Requests" (PAR)
+    const request = {
+      namespaceName: this.namespace,
+      bucketName,
+      createPreauthenticatedRequestDetails: {
+        name: `temp-access-${key}`,
+        objectName: key,
+        accessType: 'ObjectRead',
+        timeExpires: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+      },
+    };
+    const response = await this.client.createPreauthenticatedRequest(request);
+    return `https://objectstorage.${process.env.OCI_REGION}.oraclecloud.com${response.preauthenticatedRequest.accessUri}`;
+  }
+}
+
+module.exports = { OciStorageService };
+```
+
+## DatabaseService implementation
+
+```javascript oci-database.service.js
+// app/backend/src/services/providers/oci/oci-database.service.js
+const { Pool } = require('pg');
+
+class OciDatabaseService {
+  constructor() {
+    // OCI DB System uses PostgreSQL protocol
+    this.pool = new Pool({
+      host: process.env.OCI_DB_HOST,
+      port: process.env.OCI_DB_PORT || 5432,
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      ssl: { rejectUnauthorized: false },
+      max: 20,
+      idleTimeoutMillis: 30000
+    });
+  }
+
+  async query(sql, params = []) {
+    const result = await this.pool.query(sql, params);
+    return { rows: result.rows, rowCount: result.rowCount };
+  }
+
+  async beginTransaction() {
+    const client = await this.pool.connect();
+    await client.query('BEGIN');
+    return client;
+  }
+
+  async commitTransaction(client) {
+    await client.query('COMMIT');
+    client.release();
+  }
+
+  async rollbackTransaction(client) {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+
+  async ping() {
+    const start = Date.now();
+    try {
+      await this.pool.query('SELECT 1');
+      return { status: 'healthy', latencyMs: Date.now() - start };
+    } catch (error) {
+      return { status: 'unhealthy', error: error.message };
+    }
+  }
+}
+
+module.exports = { OciDatabaseService };
+```
+
+## MonitoringService implementation
+
+```javascript oci-monitoring.service.js
+// app/backend/src/services/providers/oci/oci-monitoring.service.js
+const oci = require('oci-sdk');
+
+class OciMonitoringService {
+  constructor() {
+    this.provider = new oci.common.ConfigFileAuthenticationDetailsProvider();
+    this.client = new oci.monitoring.MonitoringClient({
+      authenticationDetailsProvider: this.provider,
+    });
+  }
+
+  async putMetric(namespace, metricName, value, unit = 'count') {
+    const request = {
+      postMetricDataDetails: {
+        metricData: [{
+          namespace,
+          name: metricName,
+          compartmentId: process.env.OCI_COMPARTMENT_ID,
+          datapoints: [{
+            timestamp: new Date(),
+            value,
+          }],
+          dimensions: {}
+        }]
+      }
+    };
+    return await this.client.postMetricData(request);
+  }
+
+  async logEvent(logGroup, message, level = 'INFO') {
+    // Use OCI Logging service
+    console.log(`[${level}] ${logGroup}: ${message}`);
+  }
+
+  async createAlarm(alarmName, metricName, threshold, comparison) {
+    const alarmClient = new oci.monitoring.MonitoringClient({
+      authenticationDetailsProvider: this.provider,
+    });
+    
+    const request = {
+      createAlarmDetails: {
+        displayName: alarmName,
+        compartmentId: process.env.OCI_COMPARTMENT_ID,
+        metricCompartmentId: process.env.OCI_COMPARTMENT_ID,
+        namespace: 'govtech',
+        query: `${metricName}[1m].mean() ${comparison} ${threshold}`,
+        severity: 'CRITICAL',
+        isEnabled: true
+      }
+    };
+    return await alarmClient.createAlarm(request);
+  }
+
+  async getMetrics(namespace, metricName, periodMinutes = 60) {
+    const request = {
+      listMetricsDetails: {
+        namespace,
+        name: metricName,
+        compartmentId: process.env.OCI_COMPARTMENT_ID,
+      }
+    };
+    const response = await this.client.listMetrics(request);
+    return response.items || [];
+  }
+}
+
+module.exports = { OciMonitoringService };
+```
+
+## AuthService implementation
+
+```javascript oci-auth.service.js
+// app/backend/src/services/providers/oci/oci-auth.service.js
+const jwt = require('jsonwebtoken');
+
+class OciAuthService {
+  constructor() {
+    this.jwtSecret = process.env.JWT_SECRET || 'your-secret-key';
+  }
+
+  async verifyToken(token) {
+    try {
+      const decoded = jwt.verify(token, this.jwtSecret);
+      return { userId: decoded.userId, roles: decoded.roles, valid: true };
+    } catch (error) {
+      return { valid: false, error: error.message };
+    }
+  }
+
+  async getUserPermissions(userId) {
+    // Implement based on your RBAC system
+    // Could integrate with OCI IAM policies
+    return ['read:documents', 'write:documents'];
+  }
+
+  async generateToken(userId, roles = []) {
+    return jwt.sign(
+      { userId, roles },
+      this.jwtSecret,
+      { expiresIn: '24h' }
+    );
+  }
+
+  async revokeToken(token) {
+    // Implement token revocation (Redis blacklist, database, etc.)
+    console.log(`Token revoked: ${token}`);
+  }
+}
+
+module.exports = { OciAuthService };
+```
+
+## Terraform for OKE
+
+Create OCI infrastructure with Terraform:
+
+```hcl terraform/oci/main.tf
+resource "oci_containerengine_cluster" "govtech" {
+  compartment_id     = var.compartment_id
+  kubernetes_version = "v1.28.2"
+  name              = "govtech-cluster"
+  vcn_id            = oci_core_vcn.govtech.id
+  
+  options {
+    service_lb_subnet_ids = [oci_core_subnet.lb_subnet.id]
+  }
+}
+
+resource "oci_containerengine_node_pool" "workers" {
+  cluster_id         = oci_containerengine_cluster.govtech.id
+  compartment_id     = var.compartment_id
+  kubernetes_version = "v1.28.2"
+  name              = "worker-pool"
+  node_shape        = "VM.Standard.E4.Flex"
+  
+  node_config_details {
+    size = 3
+    placement_configs {
+      availability_domain = data.oci_identity_availability_domain.ad1.name
+      subnet_id          = oci_core_subnet.worker_subnet.id
+    }
+  }
+}
+```
+
+## Testing
+
+Test your OCI implementation:
+
+```bash
+# Set OCI provider
+export CLOUD_PROVIDER=oci
+
+# Test storage
+curl -X POST http://localhost:3000/api/storage/upload \
+  -F "file=@test.txt"
+
+# Test database
+curl http://localhost:3000/api/health/database
+
+# Test monitoring
+curl http://localhost:3000/api/metrics
+```
+
+## Cost comparison
+
+OCI typically offers 20% lower compute costs than AWS:
+
+| Service | OCI Cost | AWS Equivalent |
+|---|---|---|
+| OKE Cluster | Free | $73/month (EKS) |
+| VM.Standard.E4.Flex (4 OCPUs) | $122/month | $150/month (t3.large) |
+| DB System (2 OCPUs) | $45/month | $50/month (RDS Multi-AZ) |
+| Object Storage (100 GB) | $2.50/month | $2.30/month (S3) |
+| **Total** | **~$280/month** | **~$335/month** |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Migration Guide" icon="shuffle" href="/multicloud/migration-guide">
+    Migrate from AWS to OCI
+  </Card>
+  <Card title="Provider Comparison" icon="scale-balanced" href="/multicloud/provider-comparison">
+    Compare all providers
+  </Card>
+</CardGroup>

@@ -1,0 +1,682 @@
+---
+title: IAM Policies & Permissions
+description: Identity and Access Management policies for the GovTech Multicloud Platform
+---
+
+## Least Privilege Principle
+
+The GovTech platform implements **strict least privilege access control** with a three-tier functional hierarchy:
+
+<Warning>
+**Why Least Privilege is Critical in Cloud:**
+
+In an on-premise environment, physical access is the primary security barrier. In AWS, any compromised credential (access key, session token) can execute destructive operations from anywhere in the world within seconds. Least privilege limits the blast radius to a single functional domain.
+</Warning>
+
+## Functional Hierarchy
+
+AWS IAM doesn't have native group hierarchies. This hierarchy is **functional and risk-based**, defining who has access to what resources with what level of oversight.
+
+```
+                    [ govtech-admin ]
+                    Principal Operator
+                    Member of all groups
+                            |
+        +-------------------+-------------------+
+        |                   |                   |
+   LEVEL 1             LEVEL 2             LEVEL 3
+   Critical            Operational          Read-Only
+        |                   |                   |
+   Network-Admin       Container-Deploy    Secrets-ReadOnly
+   EKS-Admin           ALB-Operator        Monitor-ReadOnly
+   Database-Admin      CICD-Operator       Security-Auditor
+   Terraform-Operator
+```
+
+### Access Requirements by Level
+
+<Tabs>
+  <Tab title="Level 1 - Critical">
+    **Risk Level:** A malicious actor could destroy entire infrastructure
+    
+    **Groups:**
+    - GovTech-Network-Admin
+    - GovTech-EKS-Admin
+    - GovTech-Database-Admin
+    - GovTech-Terraform-Operator
+    
+    **Access Rules:**
+    - Hardware MFA required (YubiKey recommended)
+    - Maximum 8-hour session duration
+    - Requires approval from second responsible party
+    - All actions generate immediate CloudWatch alerts
+    - Weekly access review required
+  </Tab>
+  
+  <Tab title="Level 2 - Operational">
+    **Risk Level:** Can compromise application but not destroy infrastructure
+    
+    **Groups:**
+    - GovTech-Container-Deploy
+    - GovTech-ALB-Operator
+    - GovTech-CICD-Operator
+    
+    **Access Rules:**
+    - MFA required
+    - Permanent access for daily operations
+    - Monthly access review
+  </Tab>
+  
+  <Tab title="Level 3 - Read-Only">
+    **Risk Level:** Can exfiltrate information but cannot modify or delete
+    
+    **Groups:**
+    - GovTech-Secrets-ReadOnly
+    - GovTech-Monitor-ReadOnly
+    - GovTech-Security-Auditor
+    
+    **Access Rules:**
+    - MFA recommended
+    - Permanent access for monitoring roles
+    - Quarterly access review
+  </Tab>
+</Tabs>
+
+## IAM Groups and Policies
+
+### Level 1: Critical Access
+
+<AccordionGroup>
+  <Accordion title="GovTech-Network-Admin" icon="network-wired">
+    **Managed Policies:**
+    - `AmazonEC2FullAccess`
+    - `AmazonVPCFullAccess`
+    
+    **Allows:**
+    - Create and modify VPCs, subnets, Internet Gateways, NAT Gateways
+    - Manage Security Groups and Network ACLs
+    - Configure Route Tables
+    - Modify EC2 instances and network interfaces
+    
+    **Use Cases:**
+    - Network architecture changes
+    - New subnet creation
+    - Security group firewall rules
+    - VPC peering configuration
+  </Accordion>
+  
+  <Accordion title="GovTech-EKS-Admin" icon="dharmachakra">
+    **Managed Policies:**
+    - `AmazonEKSClusterPolicy`
+    
+    **Custom Policies:**
+    - `GovTech-IAM-EKS-Roles`
+    
+    **Allows:**
+    - Create and manage EKS clusters
+    - Configure node groups
+    - Upgrade Kubernetes versions
+    - Create IAM roles for EKS (prefix `eks-*` and `govtech-*`)
+    - Manage OIDC providers for IRSA
+    
+    **Use Cases:**
+    - EKS cluster creation/upgrades
+    - Node group scaling
+    - Kubernetes version updates
+    - IRSA (IAM Roles for Service Accounts) setup
+  </Accordion>
+  
+  <Accordion title="GovTech-Database-Admin" icon="database">
+    **Custom Policies:**
+    - `GovTech-RDS-Admin`
+    
+    **Allows:**
+    - Create and modify RDS instances
+    - Configure database parameters
+    - Create and restore snapshots
+    - Manage DB subnet groups
+    
+    **Protection:**
+    ```json
+    {
+      "Sid": "RDSDeletePrevention",
+      "Effect": "Deny",
+      "Action": ["rds:DeleteDBInstance"],
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "rds:db-tag/Environment": "production"
+        }
+      }
+    }
+    ```
+    Production databases with tag `Environment: production` **cannot be deleted**.
+    
+    **Use Cases:**
+    - Database maintenance
+    - Parameter tuning
+    - Backup and restore
+    - Performance optimization
+  </Accordion>
+  
+  <Accordion title="GovTech-Terraform-Operator" icon="code">
+    **Custom Policies:**
+    - `GovTech-Terraform-State`
+    - `GovTech-S3-Admin`
+    
+    **Allows:**
+    - Read/write Terraform state in S3 bucket `govtech-terraform-state`
+    - DynamoDB state locking (table: `terraform-locks`)
+    - Manage S3 buckets with prefix `govtech-*`
+    
+    **State Configuration:**
+    ```json
+    {
+      "Sid": "TerraformStateAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::govtech-terraform-state",
+        "arn:aws:s3:::govtech-terraform-state/*"
+      ]
+    }
+    ```
+    
+    **Use Cases:**
+    - Execute `terraform apply`
+    - Infrastructure changes
+    - Application S3 bucket management
+  </Accordion>
+</AccordionGroup>
+
+### Level 2: Operational Access
+
+<AccordionGroup>
+  <Accordion title="GovTech-Container-Deploy" icon="docker">
+    **Custom Policies:**
+    - `GovTech-ECR-Admin`
+    - `GovTech-EKS-Deploy`
+    
+    **ECR Admin Policy:**
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ECRFullAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ecr:CreateRepository",
+            "ecr:DeleteRepository",
+            "ecr:DescribeRepositories",
+            "ecr:PutImage",
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:InitiateLayerUpload",
+            "ecr:UploadLayerPart",
+            "ecr:CompleteLayerUpload",
+            "ecr:GetAuthorizationToken"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+    ```
+    
+    **EKS Deploy Policy:**
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "EKSClusterAccess",
+          "Effect": "Allow",
+          "Action": [
+            "eks:DescribeCluster",
+            "eks:ListClusters",
+            "eks:AccessKubernetesApi"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "EBSVolumeManagement",
+          "Effect": "Allow",
+          "Action": [
+            "ec2:CreateVolume",
+            "ec2:AttachVolume",
+            "ec2:DetachVolume",
+            "ec2:DescribeVolumes"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringEquals": {
+              "ec2:ResourceTag/Kubernetes": "owned"
+            }
+          }
+        }
+      ]
+    }
+    ```
+    
+    **Use Cases:**
+    - Deploy new application versions
+    - Push Docker images to ECR
+    - Execute `kubectl apply`
+    - Manage Kubernetes deployments
+  </Accordion>
+  
+  <Accordion title="GovTech-ALB-Operator" icon="load-balancer">
+    **Custom Policies:**
+    - `GovTech-ALB-Controller`
+    - `GovTech-AutoScaling`
+    
+    **ALB Controller Permissions:**
+    - Create/modify Application Load Balancers
+    - Manage Target Groups and Listeners
+    - Configure SSL/TLS certificates (ACM)
+    - Integrate WAF with ALB
+    - Security group management for ALBs
+    
+    **Key Actions:**
+    ```json
+    {
+      "Sid": "LoadBalancerManagement",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:DeleteLoadBalancer",
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes"
+      ],
+      "Resource": "*"
+    }
+    ```
+    
+    **WAF Integration:**
+    ```json
+    {
+      "Sid": "WAFIntegration",
+      "Effect": "Allow",
+      "Action": [
+        "wafv2:GetWebACL",
+        "wafv2:AssociateWebACL",
+        "wafv2:DisassociateWebACL"
+      ],
+      "Resource": "*"
+    }
+    ```
+    
+    **Use Cases:**
+    - Configure Kubernetes Ingress resources
+    - Manage TLS certificates
+    - Configure HPA (Horizontal Pod Autoscaler)
+    - Auto-scaling group management
+  </Accordion>
+  
+  <Accordion title="GovTech-CICD-Operator" icon="circle-play">
+    **Custom Policies:**
+    - `GovTech-CICD-Access`
+    - `GovTech-ECR-ReadOnly`
+    
+    **GitHub Actions OIDC:**
+    ```json
+    {
+      "Sid": "GitHubActionsOIDC",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateOpenIDConnectProvider",
+        "iam:GetOpenIDConnectProvider",
+        "iam:TagOpenIDConnectProvider"
+      ],
+      "Resource": "arn:aws:iam::835960996869:oidc-provider/token.actions.githubusercontent.com"
+    }
+    ```
+    
+    **CI/CD Secrets:**
+    ```json
+    {
+      "Sid": "SecretsForCICD",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:UpdateSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:govtech/cicd/*"
+    }
+    ```
+    
+    **Use Cases:**
+    - Configure GitHub Actions workflows
+    - Manage CI/CD pipeline credentials
+    - Pull container images for testing
+  </Accordion>
+</AccordionGroup>
+
+### Level 3: Read-Only Access
+
+<AccordionGroup>
+  <Accordion title="GovTech-Secrets-ReadOnly" icon="eye">
+    **Custom Policies:**
+    - `GovTech-Secrets-Read`
+    
+    **Environment-Based Access:**
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "SecretsReadDev",
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret"
+          ],
+          "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:govtech/dev/*"
+        },
+        {
+          "Sid": "SecretsReadStaging",
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret"
+          ],
+          "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:govtech/staging/*"
+        },
+        {
+          "Sid": "DenyProdSecrets",
+          "Effect": "Deny",
+          "Action": ["secretsmanager:*"],
+          "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:govtech/prod/*"
+        }
+      ]
+    }
+    ```
+    
+    <Warning>
+    **Production secrets are explicitly denied** even if AWS account permissions would otherwise allow access.
+    </Warning>
+    
+    **Use Cases:**
+    - Deployment scripts needing credentials
+    - Troubleshooting configuration issues
+    - Development environment setup
+  </Accordion>
+  
+  <Accordion title="GovTech-Monitor-ReadOnly" icon="chart-line">
+    **Managed Policies:**
+    - `CloudWatchReadOnlyAccess`
+    
+    **Custom Policies:**
+    - `GovTech-Monitoring`
+    
+    **Monitoring Policy:**
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "CloudWatchReadAccess",
+          "Effect": "Allow",
+          "Action": [
+            "cloudwatch:GetMetricData",
+            "cloudwatch:ListMetrics",
+            "cloudwatch:DescribeAlarms",
+            "logs:DescribeLogGroups",
+            "logs:GetLogEvents",
+            "logs:FilterLogEvents"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "GuardDutyReadAccess",
+          "Effect": "Allow",
+          "Action": [
+            "guardduty:GetDetector",
+            "guardduty:GetFindings",
+            "guardduty:ListFindings"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+    ```
+    
+    **Use Cases:**
+    - SRE/on-call monitoring
+    - Performance troubleshooting
+    - Log analysis
+    - GuardDuty threat review
+  </Accordion>
+  
+  <Accordion title="GovTech-Security-Auditor" icon="user-shield">
+    **Managed Policies:**
+    - `SecurityAudit`
+    
+    **Custom Policies:**
+    - `GovTech-Security-Auditor`
+    
+    **Auditor Policy:**
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "CloudTrailReadOnly",
+          "Effect": "Allow",
+          "Action": [
+            "cloudtrail:GetTrail",
+            "cloudtrail:ListTrails",
+            "cloudtrail:LookupEvents",
+            "cloudtrail:DescribeTrails"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "SecurityHubReadOnly",
+          "Effect": "Allow",
+          "Action": [
+            "securityhub:GetFindings",
+            "securityhub:ListFindings",
+            "securityhub:DescribeStandardsControls"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "IAMAccessAnalyzerReadOnly",
+          "Effect": "Allow",
+          "Action": [
+            "access-analyzer:ListAnalyzers",
+            "access-analyzer:ListFindings"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+    ```
+    
+    **Use Cases:**
+    - Security audits
+    - Compliance reviews
+    - Incident investigation
+    - Access pattern analysis
+  </Accordion>
+</AccordionGroup>
+
+## Permission Boundaries
+
+All roles use a **permission boundary** to enforce hard limits:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowedServices",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*",
+        "eks:*",
+        "ecr:*",
+        "rds:*",
+        "s3:*",
+        "cloudwatch:*",
+        "secretsmanager:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDangerousActions",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:CreateAccessKey",
+        "organizations:*",
+        "account:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyRegionOutsideUSEast1",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    }
+  ]
+}
+```
+
+<Note>
+**Permission boundaries** act as a maximum permission set. Even if a user's policy grants access, the permission boundary can still deny it.
+</Note>
+
+## User Management
+
+### Adding a New User
+
+```bash
+# 1. Create the user
+aws iam create-user --user-name john.doe
+
+# 2. Assign to appropriate groups based on role
+aws iam add-user-to-group \
+  --user-name john.doe \
+  --group-name GovTech-Container-Deploy
+
+aws iam add-user-to-group \
+  --user-name john.doe \
+  --group-name GovTech-Monitor-ReadOnly
+
+# 3. Create console access with temporary password
+aws iam create-login-profile \
+  --user-name john.doe \
+  --password "TempPass2026!" \
+  --password-reset-required
+
+# 4. Enable MFA (user must complete via console)
+echo "User must enable MFA at first login"
+```
+
+### Recommended Group Assignment by Role
+
+| Role | Recommended Groups |
+|------|--------------------|
+| **Cloud Architect** | Network-Admin, EKS-Admin, Terraform-Operator (temporary) |
+| **DevOps Engineer** | Container-Deploy, CICD-Operator |
+| **SRE / On-Call** | Monitor-ReadOnly, Secrets-ReadOnly |
+| **Database Administrator** | Database-Admin (temporary for maintenance) |
+| **Security Analyst** | Security-Auditor |
+| **Developer** | Container-Deploy (if responsible for own deployments) |
+
+### Rotating Access Keys
+
+<Steps>
+  <Step title="Create New Key">
+    ```bash
+    aws iam create-access-key --user-name govtech-admin
+    ```
+    Save the new `AccessKeyId` and `SecretAccessKey`.
+  </Step>
+  
+  <Step title="Test New Key">
+    Configure new key in AWS CLI and verify it works:
+    ```bash
+    aws configure --profile govtech-new
+    aws sts get-caller-identity --profile govtech-new
+    ```
+  </Step>
+  
+  <Step title="Deactivate Old Key">
+    ```bash
+    aws iam update-access-key \
+      --user-name govtech-admin \
+      --access-key-id AKIA_OLD_KEY \
+      --status Inactive
+    ```
+  </Step>
+  
+  <Step title="Delete Old Key">
+    After confirming new key works everywhere:
+    ```bash
+    aws iam delete-access-key \
+      --user-name govtech-admin \
+      --access-key-id AKIA_OLD_KEY
+    ```
+  </Step>
+</Steps>
+
+## Audit Commands
+
+```bash
+# View all groups for a user
+aws iam list-groups-for-user --user-name govtech-admin
+
+# List all policies attached to a group
+aws iam list-attached-group-policies --group-name GovTech-EKS-Admin
+
+# Check active access keys and their age
+aws iam list-access-keys --user-name govtech-admin
+
+# View recent CloudTrail events for a user
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=Username,AttributeValue=govtech-admin \
+  --max-results 20
+
+# Find all "delete" operations in last 7 days
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=DeleteDBInstance
+```
+
+## Monthly Security Checklist
+
+<Accordion title="IAM Security Review Checklist">
+  - [ ] Review CloudTrail for unusual actions or off-hours access
+  - [ ] Verify no access keys older than 90 days
+  - [ ] Confirm MFA is enabled for all users
+  - [ ] Review active GuardDuty and Security Hub findings
+  - [ ] Validate no users with direct permissions (must use groups)
+  - [ ] Check for IAM roles with excessive permissions
+  - [ ] Verify permission boundaries are attached to all roles
+  - [ ] Review temporary access grants (should be revoked after use)
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Network Policies" icon="shield-halved" href="/security/network-policies">
+    Learn about Kubernetes network segmentation
+  </Card>
+  <Card title="Secrets Management" icon="key" href="/security/secrets-management">
+    Secure credential management with AWS Secrets Manager
+  </Card>
+</CardGroup>

@@ -1,0 +1,702 @@
+---
+title: "Platform Overview"
+description: "Architecture, design patterns, and key features of the GovTech Multicloud Platform"
+---
+
+## What is the GovTech Multicloud Platform?
+
+The GovTech Multicloud Platform is a production-ready infrastructure solution that enables organizations to migrate between cloud providers (AWS, OCI, GCP, Azure) without rewriting application code. Built with enterprise-grade security, scalability, and modern design patterns.
+
+<Note>
+  **Key Achievement**: Reduces cloud migration time from 6+ months to 2-3 weeks, with 96-98% cost savings compared to traditional vendor solutions.
+</Note>
+
+## Multi-Cloud Architecture
+
+### How It Works
+
+The platform uses **interface-based abstraction** with the **Factory Pattern** to achieve true cloud-agnostic architecture:
+
+```
+Application Code
+      ↓
+Service Factories (getStorageService, getDatabaseService)
+      ↓
+Interfaces (StorageService, DatabaseService, MonitoringService, AuthService)
+      ↓
+    ┌─────┴─────┬─────────┬─────────┐
+    ↓           ↓         ↓         ↓
+  AWS         OCI       GCP      Azure
+Provider    Provider  Provider  Provider
+```
+
+### Real Example: Cloud-Agnostic File Upload
+
+This code works with **any** cloud provider:
+
+```javascript
+const { getStorageService } = require('./services/factory');
+
+// This code works with AWS S3, OCI Object Storage, GCP GCS, or Azure Blob
+const storage = getStorageService();
+const url = await storage.uploadFile(file, 'documents/file.pdf');
+```
+
+**To switch from AWS to OCI:**
+
+```bash
+# 1. Change ONE line in .env:
+CLOUD_PROVIDER=oci
+
+# 2. Restart server
+npm start
+
+# Same code, different cloud. Done.
+```
+
+<Check>
+  No application code changes required. The factory pattern automatically selects the correct provider implementation.
+</Check>
+
+## Design Patterns
+
+<AccordionGroup>
+  <Accordion title="Strategy Pattern" icon="chess">
+    Multiple implementations of the same interface for different cloud providers.
+
+    **Example**: StorageService interface has 4 implementations:
+    - `AWSStorageService` (S3)
+    - `OCIStorageService` (Object Storage)
+    - `GCPStorageService` (Cloud Storage)
+    - `AzureStorageService` (Blob Storage)
+
+    All implement the same methods: `uploadFile()`, `downloadFile()`, `deleteFile()`
+  </Accordion>
+
+  <Accordion title="Factory Pattern" icon="industry">
+    Single entry point to get the right provider based on configuration.
+
+    ```javascript
+    // factory.js
+    function getStorageService() {
+      const provider = process.env.CLOUD_PROVIDER || 'aws';
+      
+      switch (provider) {
+        case 'aws':
+          return new AWSStorageService();
+        case 'oci':
+          return new OCIStorageService();
+        case 'gcp':
+          return new GCPStorageService();
+        case 'azure':
+          return new AzureStorageService();
+        default:
+          throw new Error(`Unknown provider: ${provider}`);
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Dependency Injection" icon="syringe">
+    Services are injected via factory methods, not hardcoded.
+
+    ```javascript
+    // Bad: Hardcoded to AWS
+    const s3 = new AWS.S3();
+
+    // Good: Injected via factory
+    const storage = getStorageService();
+    ```
+  </Accordion>
+
+  <Accordion title="Interface-Based Abstraction" icon="layer-group">
+    All cloud operations go through well-defined contracts.
+
+    ```javascript
+    // storage.interface.js
+    class StorageService {
+      async uploadFile(file, key) { throw new Error('Not implemented'); }
+      async downloadFile(key) { throw new Error('Not implemented'); }
+      async deleteFile(key) { throw new Error('Not implemented'); }
+      async listFiles(prefix) { throw new Error('Not implemented'); }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Infrastructure Architecture
+
+### AWS Production Architecture
+
+```
+Internet
+    |
+    v
+[Route53 DNS] → govtech.example.com
+    |
+    v
+[WAF] ← Blocks: SQL injection, XSS, bots, rate limit
+    |
+    v
+[AWS ALB] ← Load Balancer with HTTPS (ACM)
+    |
+    ├── /api/* → Backend Service (ClusterIP :3000)
+    └── /*     → Frontend Service (ClusterIP :80)
+                      |
+       [NetworkPolicies: Zero-Trust]
+            ┌─────────v──────────┐
+            │    EKS Cluster      │
+            │  (Private Subnets)  │
+            │                    │
+            │  ┌──────────────┐  │
+            │  │   frontend   │  │ ← React/Nginx (2-8 pods)
+            │  │  (HPA)       │  │
+            │  └──────┬───────┘  │
+            │         │ :3000    │
+            │  ┌──────v───────┐  │
+            │  │   backend    │  │ ← Node.js (2-10 pods)
+            │  │  (HPA)       │  │
+            │  └──────┬───────┘  │
+            │         │ :5432    │
+            │  ┌──────v───────┐  │
+            │  │   RDS        │  │ ← PostgreSQL Multi-AZ
+            │  │  (Multi-AZ)  │  │
+            │  └──────────────┘  │
+            └────────────────────┘
+```
+
+### Key Infrastructure Components
+
+<Tabs>
+  <Tab title="Kubernetes">
+    **EKS Cluster Configuration:**
+
+    ```yaml
+    # backend/deployment.yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: backend
+      namespace: govtech
+    spec:
+      replicas: 3
+      containers:
+      - name: backend
+        image: 835960996869.dkr.ecr.us-east-1.amazonaws.com/govtech-backend:latest
+        ports:
+        - containerPort: 3000
+        
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+    ```
+
+    **Key Features:**
+    - Rolling updates (maxSurge: 1, maxUnavailable: 0)
+    - Health checks (liveness + readiness probes)
+    - Resource limits and requests
+    - Non-root security context
+    - HPA for auto-scaling (2-10 pods)
+  </Tab>
+
+  <Tab title="Docker">
+    **Multi-stage Dockerfile:**
+
+    ```dockerfile
+    # STAGE 1: Builder
+    FROM node:20-slim AS builder
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm install
+    COPY . .
+
+    # STAGE 2: Production
+    FROM node:20-slim
+    
+    # Non-root user
+    RUN groupadd -g 1001 nodejs && \
+        useradd -u 1001 -g nodejs -s /bin/sh -m nodejs
+    
+    WORKDIR /app
+    COPY --chown=nodejs:nodejs package*.json ./
+    
+    USER nodejs
+    RUN npm install --omit=dev && npm cache clean --force
+    
+    COPY --chown=nodejs:nodejs --from=builder /app/server.js ./
+    COPY --chown=nodejs:nodejs --from=builder /app/src ./src
+    
+    EXPOSE 3000
+    
+    HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+        CMD node -e "require('http').get('http://localhost:3000/api/health', ...)"
+    
+    CMD ["node", "server.js"]
+    ```
+
+    **Key Features:**
+    - Multi-stage build (smaller image)
+    - Non-root user (security)
+    - Health checks built-in
+    - Production dependencies only
+  </Tab>
+
+  <Tab title="Terraform">
+    **Infrastructure as Code:**
+
+    ```hcl
+    # main.tf
+    terraform {
+      required_version = ">= 1.5.0"
+      
+      backend "s3" {
+        bucket  = "govtech-terraform-state-835960996869"
+        key     = "terraform.tfstate"
+        region  = "us-east-1"
+        encrypt = true
+      }
+    }
+
+    provider "aws" {
+      region = var.aws_region
+      
+      default_tags {
+        tags = {
+          Project     = "govtech"
+          Environment = var.environment
+          ManagedBy   = "terraform"
+        }
+      }
+    }
+
+    module "networking" {
+      source = "./modules/networking"
+      # VPC, Subnets, IGW, NAT Gateway, Security Groups
+    }
+
+    module "kubernetes-cluster" {
+      source = "./modules/kubernetes-cluster"
+      # EKS, Node Groups, IAM, OIDC
+    }
+
+    module "database" {
+      source = "./modules/database"
+      # RDS PostgreSQL, Multi-AZ in prod
+    }
+
+    module "security" {
+      source = "./modules/security"
+      # KMS, CloudTrail, GuardDuty, Security Hub, WAF
+    }
+    ```
+
+    **Modules:**
+    - `networking` - VPC, subnets, NAT Gateway
+    - `kubernetes-cluster` - EKS with node groups
+    - `database` - RDS PostgreSQL Multi-AZ
+    - `storage` - S3 with lifecycle rules
+    - `security` - WAF, GuardDuty, CloudTrail, KMS
+  </Tab>
+
+  <Tab title="CI/CD">
+    **GitHub Actions Pipelines:**
+
+    ```yaml
+    # .github/workflows/backend-ci.yml
+    name: Backend CI
+
+    on:
+      push:
+        branches: [main, staging]
+        paths:
+          - 'platform/app/backend/**'
+
+    jobs:
+      build:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+          
+          - name: Lint & Test
+            run: |
+              cd platform/app/backend
+              npm install
+              npm run lint
+              npm test
+          
+          - name: Build Docker Image
+            run: |
+              docker build -t govtech-backend:${{ github.sha }} .
+          
+          - name: Trivy Security Scan
+            run: |
+              trivy image --severity CRITICAL,HIGH --exit-code 1 \
+                govtech-backend:${{ github.sha }}
+          
+          - name: Push to ECR
+            run: |
+              aws ecr get-login-password --region us-east-1 | \
+                docker login --username AWS --password-stdin \
+                835960996869.dkr.ecr.us-east-1.amazonaws.com
+              docker push ...
+          
+          - name: Generate SBOM
+            run: syft govtech-backend:${{ github.sha }} -o cyclonedx-json
+    ```
+
+    **Security Scans:**
+    - Gitleaks (secrets in git)
+    - Semgrep (SAST)
+    - Trivy (container vulnerabilities)
+    - Checkov (IaC security)
+    - npm audit (dependency CVEs)
+  </Tab>
+</Tabs>
+
+## Security Features
+
+### Defense in Depth (7 Layers)
+
+| Layer | Technology | Protects Against |
+|-------|-----------|------------------|
+| 1. Perimeter | WAF (5 AWS Managed Rules) | SQL injection, XSS, bots before reaching app |
+| 2. Network | NetworkPolicies | Zero-trust pod communication |
+| 3. Identity | RBAC + IRSA | Least privilege per component |
+| 4. Secrets | Secrets Manager + KMS | Encrypted credentials, no hardcoding |
+| 5. Containers | Trivy + Pod Security | No CRITICAL/HIGH vulnerabilities |
+| 6. Code | Semgrep + Gitleaks | No secrets or vulnerabilities in git |
+| 7. Audit | CloudTrail + GuardDuty | Anomaly detection and forensics |
+
+<Warning>
+  **Production Security Checklist:**
+  - Enable WAF on ALB
+  - Use Secrets Manager (not Kubernetes Secrets)
+  - Enable CloudTrail logging
+  - Configure GuardDuty
+  - Set up Security Hub
+  - Enable KMS encryption for RDS and S3
+  - Implement NetworkPolicies
+  - Use IRSA (not static credentials)
+</Warning>
+
+### Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Secrets Management" icon="key">
+    **Development:**
+    ```bash
+    # .env file (local only, never commit)
+    JWT_SECRET=dev-secret-change-in-production-32c
+    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/govtech_dev
+    ```
+
+    **Production:**
+    ```bash
+    # Use AWS Secrets Manager
+    aws secretsmanager create-secret \
+      --name govtech/prod/database \
+      --secret-string '{"username":"...","password":"..."}'
+
+    # Backend retrieves from Secrets Manager via IRSA
+    const secret = await secretsManager.getSecretValue({
+      SecretId: 'govtech/prod/database'
+    }).promise();
+    ```
+  </Accordion>
+
+  <Accordion title="Network Isolation" icon="shield-halved">
+    **Zero-Trust Network Policies:**
+
+    ```yaml
+    # Deny all traffic by default
+    kind: NetworkPolicy
+    metadata:
+      name: default-deny-all
+    spec:
+      podSelector: {}
+      policyTypes:
+      - Ingress
+      - Egress
+
+    ---
+    # Allow frontend → backend only
+    kind: NetworkPolicy
+    metadata:
+      name: allow-frontend-to-backend
+    spec:
+      podSelector:
+        matchLabels:
+          app: backend
+      ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+        ports:
+        - port: 3000
+    ```
+  </Accordion>
+
+  <Accordion title="RBAC & IRSA" icon="user-shield">
+    **Service Accounts:**
+    - `govtech-frontend` - No AWS permissions, no DB access
+    - `govtech-backend` - IRSA role for S3, Secrets Manager, CloudWatch
+    - `govtech-database` - Receive only, no outbound
+
+    **IAM Role for Service Account (IRSA):**
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:DeleteObject"
+          ],
+          "Resource": "arn:aws:s3:::govtech-documents/*"
+        }
+      ]
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Health Monitoring
+
+The platform includes comprehensive health checks at multiple levels:
+
+### Application Health Endpoints
+
+<CodeGroup>
+```bash Overall Health
+curl http://localhost:3000/api/health
+
+# Response:
+{
+  "status": "healthy",
+  "timestamp": "2026-03-03T18:30:00.000Z",
+  "provider": "aws",
+  "uptime": 45.2,
+  "checks": {
+    "database": { "status": "healthy", "stats": {...} },
+    "cloudCredentials": { "status": "healthy" }
+  },
+  "responseTime": "5ms"
+}
+```
+
+```bash Database Health
+curl http://localhost:3000/api/health/database
+
+# Response:
+{
+  "status": "healthy",
+  "provider": "aws",
+  "stats": {
+    "total": 10,
+    "idle": 4,
+    "waiting": 0
+  },
+  "version": "PostgreSQL 15.4",
+  "uptime": "12h 34m"
+}
+```
+
+```bash Cloud Credentials
+curl http://localhost:3000/api/health/cloud
+
+# Response:
+{
+  "status": "healthy",
+  "provider": "aws",
+  "identity": {
+    "account": "835960996869",
+    "arn": "arn:aws:sts::835960996869:assumed-role/...",
+    "userId": "AROA835960996869:govtech"
+  },
+  "region": "us-east-1"
+}
+```
+</CodeGroup>
+
+### Kubernetes Health Checks
+
+```yaml
+# Liveness Probe - Is the container alive?
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3  # Restart after 3 failures
+
+# Readiness Probe - Ready for traffic?
+readinessProbe:
+  httpGet:
+    path: /api/health
+    port: 3000
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  failureThreshold: 3  # Remove from load balancer
+```
+
+### Docker Health Checks
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+```
+
+## Scalability
+
+### Horizontal Pod Autoscaler (HPA)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+### Scale Benchmarks
+
+| Organization | Users | Daily Txns | Required Architecture | Setup Time |
+|--------------|-------|------------|----------------------|------------|
+| Estonia e-Gov | 1.3M | 200K/day | Current (2-3 pods) | Ready |
+| Colombia GOV.CO | 50M | 2M/day | + Read replicas | 2 weeks |
+| UK gov.uk | 67M | 8M/day | + Sharding | 2 months |
+| India DigiLocker | 1.4B | 15M/day | + Multi-region | 6 months |
+
+## Environment Configuration
+
+### Development vs Production
+
+<Tabs>
+  <Tab title="Development">
+    ```bash
+    # docker-compose.yml environment
+    NODE_ENV=development
+    DATABASE_URL=postgresql://postgres:postgres@postgres:5432/govtech_dev
+    CLOUD_PROVIDER=aws
+    AWS_ACCESS_KEY_ID=demo-access-key-local-dev
+    AWS_SECRET_ACCESS_KEY=demo-secret-key-local-dev-only
+    JWT_SECRET=dev-secret-change-in-production-32c
+    ```
+
+    **Characteristics:**
+    - Single PostgreSQL container (not Multi-AZ)
+    - Placeholder AWS credentials
+    - Hot reload enabled
+    - Debug logging
+    - 2 EKS nodes (t3.medium)
+  </Tab>
+
+  <Tab title="Production">
+    ```bash
+    # Kubernetes ConfigMap + Secrets
+    NODE_ENV=production
+    DATABASE_URL=<from-secrets-manager>
+    CLOUD_PROVIDER=aws
+    AWS_REGION=us-east-1
+    # No AWS keys - uses IRSA
+    JWT_SECRET=<from-secrets-manager>
+    ```
+
+    **Characteristics:**
+    - RDS PostgreSQL Multi-AZ
+    - IRSA for AWS credentials
+    - Secrets Manager for sensitive data
+    - CloudWatch logging
+    - 3-10 EKS nodes (auto-scaled)
+    - WAF, GuardDuty, Security Hub enabled
+  </Tab>
+</Tabs>
+
+## Cost Optimization
+
+### Environment Costs
+
+| Environment | EKS Nodes | RDS | Multi-AZ | Monthly Cost |
+|-------------|-----------|-----|----------|-------------|
+| dev | 2-4 × t3.medium | db.t3.micro | No | ~$180 |
+| staging | 2-6 × t3.small | db.t3.small | No | ~$200 |
+| prod | 3-10 × t3.medium | db.t3.small | **Yes** | ~$335 |
+
+<Tip>
+  Use **Cost Anomaly Detection** to get alerts when spending increases unexpectedly. Configure in the security Terraform module.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Deploy to Kubernetes"
+    icon="cubes"
+    href="/deployment/kubernetes"
+  >
+    Step-by-step guide to deploy on EKS with Terraform
+  </Card>
+  <Card
+    title="Multi-Cloud Migration"
+    icon="arrows-rotate"
+    href="/migration/overview"
+  >
+    Learn how to migrate from AWS to OCI/GCP/Azure
+  </Card>
+  <Card
+    title="Security Hardening"
+    icon="shield"
+    href="/security/overview"
+  >
+    Implement WAF, GuardDuty, and other security controls
+  </Card>
+  <Card
+    title="API Reference"
+    icon="code"
+    href="/api-reference"
+  >
+    Complete API documentation with examples
+  </Card>
+</CardGroup>

@@ -1,0 +1,492 @@
+---
+title: GCP implementation
+description: Google Cloud Platform implementation guide for the GovTech platform
+---
+
+This guide shows how to implement the GovTech platform on Google Cloud Platform (GCP). The service interfaces are already defined - you just need to implement the GCP-specific code.
+
+<Note>
+**Status:** Structure ready. Implementation time: 3-4 days.
+
+All service interfaces are defined and the Factory pattern is in place. You only need to implement the 4 service classes for GCP.
+</Note>
+
+## GCP services mapping
+
+| Platform Service | GCP Service | SDK Package |
+|---|---|---|
+| StorageService | Cloud Storage | `@google-cloud/storage` |
+| DatabaseService | Cloud SQL (PostgreSQL) | `pg` (standard PostgreSQL) |
+| MonitoringService | Cloud Operations (Stackdriver) | `@google-cloud/monitoring` |
+| AuthService | Firebase Auth / IAM | `firebase-admin` |
+| Kubernetes | Google Kubernetes Engine (GKE) | `@google-cloud/container` |
+| Container Registry | Artifact Registry | Built-in |
+| Secrets | Secret Manager | `@google-cloud/secret-manager` |
+
+## Implementation steps
+
+<Steps>
+  <Step title="Install GCP SDKs">
+    Install the Google Cloud client libraries:
+    
+    ```bash npm
+    npm install @google-cloud/storage \
+      @google-cloud/monitoring \
+      @google-cloud/secret-manager \
+      pg
+    ```
+  </Step>
+  
+  <Step title="Configure GCP credentials">
+    Set up service account credentials:
+    
+    ```bash
+    gcloud auth application-default login
+    ```
+    
+    Or use environment variables:
+    
+    ```env
+    CLOUD_PROVIDER=gcp
+    GCP_PROJECT_ID=govtech-prod
+    GCP_REGION=us-central1
+    GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa-key.json
+    ```
+  </Step>
+  
+  <Step title="Create service account key">
+    ```bash
+    gcloud iam service-accounts create govtech-backend \
+      --display-name="GovTech Backend Service Account"
+    
+    gcloud iam service-accounts keys create gcp-sa-key.json \
+      --iam-account=govtech-backend@govtech-prod.iam.gserviceaccount.com
+    ```
+  </Step>
+  
+  <Step title="Implement service classes">
+    Create the 4 service implementation files in `app/backend/src/services/providers/gcp/`:
+    
+    - `gcp-storage.service.js`
+    - `gcp-database.service.js`
+    - `gcp-monitoring.service.js`
+    - `gcp-auth.service.js`
+  </Step>
+  
+  <Step title="Update the Factory">
+    Uncomment the GCP section in `src/services/factory.js`:
+    
+    ```javascript
+    const PROVIDERS = {
+      aws: { /* ... */ },
+      gcp: {
+        storage:    () => new GcpStorageService(),
+        database:   () => new GcpDatabaseService(),
+        monitoring: () => new GcpMonitoringService(),
+        auth:       () => new GcpAuthService(),
+      },
+    };
+    ```
+  </Step>
+</Steps>
+
+## StorageService implementation
+
+Here's the complete implementation for Cloud Storage:
+
+```javascript gcp-storage.service.js
+// app/backend/src/services/providers/gcp/gcp-storage.service.js
+const { Storage } = require('@google-cloud/storage');
+
+class GcpStorageService {
+  constructor() {
+    this.storage = new Storage({
+      projectId: process.env.GCP_PROJECT_ID,
+      keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    });
+  }
+
+  async uploadFile(bucketName, key, body, contentType) {
+    const bucket = this.storage.bucket(bucketName);
+    const file = bucket.file(key);
+    
+    await file.save(body, {
+      contentType,
+      metadata: {
+        contentType,
+      },
+    });
+    
+    return { key, bucketName };
+  }
+
+  async downloadFile(bucketName, key) {
+    const bucket = this.storage.bucket(bucketName);
+    const file = bucket.file(key);
+    const [contents] = await file.download();
+    return contents; // Buffer
+  }
+
+  async deleteFile(bucketName, key) {
+    const bucket = this.storage.bucket(bucketName);
+    const file = bucket.file(key);
+    await file.delete();
+    return { deleted: true };
+  }
+
+  async listFiles(bucketName, prefix = '') {
+    const bucket = this.storage.bucket(bucketName);
+    const [files] = await bucket.getFiles({ prefix });
+    
+    return files.map(file => ({
+      key: file.name,
+      size: parseInt(file.metadata.size),
+      lastModified: new Date(file.metadata.updated),
+    }));
+  }
+
+  async getSignedUrl(bucketName, key, expiresInSeconds = 3600) {
+    const bucket = this.storage.bucket(bucketName);
+    const file = bucket.file(key);
+    
+    const [url] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'read',
+      expires: Date.now() + expiresInSeconds * 1000,
+    });
+    
+    return url;
+  }
+}
+
+module.exports = { GcpStorageService };
+```
+
+## DatabaseService implementation
+
+```javascript gcp-database.service.js
+// app/backend/src/services/providers/gcp/gcp-database.service.js
+const { Pool } = require('pg');
+
+class GcpDatabaseService {
+  constructor() {
+    // Cloud SQL uses standard PostgreSQL protocol
+    // For Unix socket connection (Cloud Run, GKE):
+    const socketPath = process.env.DB_SOCKET_PATH || '/cloudsql';
+    const instanceConnectionName = process.env.INSTANCE_CONNECTION_NAME;
+    
+    this.pool = new Pool({
+      // Unix socket (recommended for GCP)
+      host: instanceConnectionName ? 
+        `${socketPath}/${instanceConnectionName}` : 
+        process.env.DB_HOST,
+      port: process.env.DB_PORT || 5432,
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      max: 20,
+      idleTimeoutMillis: 30000
+    });
+  }
+
+  async query(sql, params = []) {
+    const result = await this.pool.query(sql, params);
+    return { rows: result.rows, rowCount: result.rowCount };
+  }
+
+  async beginTransaction() {
+    const client = await this.pool.connect();
+    await client.query('BEGIN');
+    return client;
+  }
+
+  async commitTransaction(client) {
+    await client.query('COMMIT');
+    client.release();
+  }
+
+  async rollbackTransaction(client) {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+
+  async ping() {
+    const start = Date.now();
+    try {
+      await this.pool.query('SELECT 1');
+      return { status: 'healthy', latencyMs: Date.now() - start };
+    } catch (error) {
+      return { status: 'unhealthy', error: error.message };
+    }
+  }
+}
+
+module.exports = { GcpDatabaseService };
+```
+
+## MonitoringService implementation
+
+```javascript gcp-monitoring.service.js
+// app/backend/src/services/providers/gcp/gcp-monitoring.service.js
+const monitoring = require('@google-cloud/monitoring');
+
+class GcpMonitoringService {
+  constructor() {
+    this.client = new monitoring.MetricServiceClient();
+    this.projectId = process.env.GCP_PROJECT_ID;
+    this.projectPath = this.client.projectPath(this.projectId);
+  }
+
+  async putMetric(namespace, metricName, value, unit = 'Count') {
+    const dataPoint = {
+      interval: {
+        endTime: { seconds: Date.now() / 1000 },
+      },
+      value: {
+        doubleValue: value,
+      },
+    };
+
+    const timeSeriesData = {
+      metric: {
+        type: `custom.googleapis.com/${namespace}/${metricName}`,
+      },
+      resource: {
+        type: 'global',
+      },
+      points: [dataPoint],
+    };
+
+    const request = {
+      name: this.projectPath,
+      timeSeries: [timeSeriesData],
+    };
+
+    await this.client.createTimeSeries(request);
+    return { success: true };
+  }
+
+  async logEvent(logGroup, message, level = 'INFO') {
+    // Use Cloud Logging
+    console.log(`[${level}] ${logGroup}: ${message}`);
+  }
+
+  async createAlarm(alarmName, metricName, threshold, comparison) {
+    const alertClient = new monitoring.AlertPolicyServiceClient();
+    
+    const alertPolicy = {
+      displayName: alarmName,
+      conditions: [{
+        displayName: `${metricName} ${comparison} ${threshold}`,
+        conditionThreshold: {
+          filter: `metric.type="custom.googleapis.com/govtech/${metricName}"`,
+          comparison: comparison === '>' ? 'COMPARISON_GT' : 'COMPARISON_LT',
+          thresholdValue: threshold,
+          duration: { seconds: 60 },
+        },
+      }],
+      enabled: true,
+    };
+
+    const request = {
+      name: this.projectPath,
+      alertPolicy,
+    };
+
+    await alertClient.createAlertPolicy(request);
+    return { success: true };
+  }
+
+  async getMetrics(namespace, metricName, periodMinutes = 60) {
+    const request = {
+      name: this.projectPath,
+      filter: `metric.type="custom.googleapis.com/${namespace}/${metricName}"`,
+      interval: {
+        startTime: {
+          seconds: (Date.now() / 1000) - (periodMinutes * 60),
+        },
+        endTime: {
+          seconds: Date.now() / 1000,
+        },
+      },
+    };
+
+    const [timeSeries] = await this.client.listTimeSeries(request);
+    return timeSeries.map(ts => ({
+      timestamp: ts.points[0].interval.endTime,
+      value: ts.points[0].value.doubleValue,
+    }));
+  }
+}
+
+module.exports = { GcpMonitoringService };
+```
+
+## AuthService implementation
+
+```javascript gcp-auth.service.js
+// app/backend/src/services/providers/gcp/gcp-auth.service.js
+const admin = require('firebase-admin');
+
+class GcpAuthService {
+  constructor() {
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.applicationDefault(),
+        projectId: process.env.GCP_PROJECT_ID,
+      });
+    }
+  }
+
+  async verifyToken(token) {
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      return {
+        userId: decodedToken.uid,
+        roles: decodedToken.customClaims?.roles || [],
+        valid: true,
+      };
+    } catch (error) {
+      return { valid: false, error: error.message };
+    }
+  }
+
+  async getUserPermissions(userId) {
+    const user = await admin.auth().getUser(userId);
+    return user.customClaims?.permissions || [];
+  }
+
+  async generateToken(userId, roles = []) {
+    await admin.auth().setCustomUserClaims(userId, { roles });
+    return await admin.auth().createCustomToken(userId);
+  }
+
+  async revokeToken(token) {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    await admin.auth().revokeRefreshTokens(decodedToken.uid);
+  }
+}
+
+module.exports = { GcpAuthService };
+```
+
+## Terraform for GKE
+
+Create GCP infrastructure with Terraform:
+
+```hcl terraform/gcp/main.tf
+resource "google_container_cluster" "govtech" {
+  name     = "govtech-cluster"
+  location = "us-central1"
+  
+  remove_default_node_pool = true
+  initial_node_count       = 1
+  
+  network    = google_compute_network.vpc.name
+  subnetwork = google_compute_subnetwork.subnet.name
+}
+
+resource "google_container_node_pool" "primary" {
+  name       = "primary-pool"
+  location   = "us-central1"
+  cluster    = google_container_cluster.govtech.name
+  node_count = 3
+  
+  node_config {
+    machine_type = "e2-medium"
+    
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+    
+    metadata = {
+      disable-legacy-endpoints = "true"
+    }
+  }
+}
+
+resource "google_sql_database_instance" "postgres" {
+  name             = "govtech-db"
+  database_version = "POSTGRES_15"
+  region           = "us-central1"
+  
+  settings {
+    tier = "db-f1-micro"
+    
+    backup_configuration {
+      enabled = true
+      start_time = "02:00"
+    }
+  }
+}
+```
+
+## Workload Identity
+
+Use Workload Identity for secure authentication (GCP's equivalent to AWS IRSA):
+
+```bash
+# Enable Workload Identity on cluster
+gcloud container clusters update govtech-cluster \
+  --workload-pool=govtech-prod.svc.id.goog
+
+# Create Google service account
+gcloud iam service-accounts create govtech-backend
+
+# Bind Kubernetes SA to Google SA
+gcloud iam service-accounts add-iam-policy-binding \
+  govtech-backend@govtech-prod.iam.gserviceaccount.com \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:govtech-prod.svc.id.goog[govtech/govtech-backend]"
+
+# Annotate Kubernetes service account
+kubectl annotate serviceaccount govtech-backend \
+  iam.gke.io/gcp-service-account=govtech-backend@govtech-prod.iam.gserviceaccount.com
+```
+
+## Testing
+
+Test your GCP implementation:
+
+```bash
+# Set GCP provider
+export CLOUD_PROVIDER=gcp
+export GCP_PROJECT_ID=govtech-prod
+
+# Test storage
+curl -X POST http://localhost:3000/api/storage/upload \
+  -F "file=@test.txt"
+
+# Test database
+curl http://localhost:3000/api/health/database
+
+# Test monitoring
+curl http://localhost:3000/api/metrics
+```
+
+## Cost comparison
+
+GCP pricing with sustained use discounts:
+
+| Service | GCP Cost | AWS Equivalent |
+|---|---|---|
+| GKE Cluster | Free (Autopilot: $0.10/hr) | $73/month (EKS) |
+| e2-medium (2 vCPUs, 4GB) | $24/month | $30/month (t3.medium) |
+| Cloud SQL (db-f1-micro) | $15/month | $50/month (RDS Multi-AZ) |
+| Cloud Storage (100 GB) | $2/month | $2.30/month (S3) |
+| **Total** | **~$320/month** | **~$335/month** |
+
+<Tip>
+GCP offers sustained use discounts (up to 30% off) automatically when resources run for significant portions of the month.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Migration Guide" icon="shuffle" href="/multicloud/migration-guide">
+    Migrate from AWS to GCP
+  </Card>
+  <Card title="Provider Comparison" icon="scale-balanced" href="/multicloud/provider-comparison">
+    Compare all providers
+  </Card>
+</CardGroup>

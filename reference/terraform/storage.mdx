@@ -1,0 +1,468 @@
+---
+title: Storage Module
+description: S3 bucket with versioning, lifecycle policies, and IRSA-based access
+---
+
+The storage module creates an Amazon S3 bucket for application file storage with versioning, encryption, intelligent lifecycle management, and IAM role for pod-level access via IRSA.
+
+## Overview
+
+This module provisions:
+- S3 bucket with encryption at rest
+- Versioning for file recovery
+- Lifecycle rules for cost optimization
+- CORS configuration for frontend uploads
+- IAM role for Kubernetes pods (IRSA)
+- Public access blocking
+
+## Resources Created
+
+### S3 Bucket
+- **Resource**: `aws_s3_bucket.app_storage`
+- **Naming**: `{project_name}-{environment}-app-storage-{aws_account_id}`
+- **Use cases**: User uploads, generated reports, data exports
+
+### Public Access Block
+- **Resource**: `aws_s3_bucket_public_access_block.app_storage`
+- Prevents accidental public exposure
+- Blocks all public ACLs and policies
+
+### Versioning
+- **Resource**: `aws_s3_bucket_versioning.app_storage`
+- Maintains all versions of objects
+- Enables recovery from accidental deletions
+- Old versions automatically expire per lifecycle rules
+
+### Encryption
+- **Resource**: `aws_s3_bucket_server_side_encryption_configuration.app_storage`
+- **Algorithm**: AES-256 (S3-managed keys)
+- **Bucket key**: Enabled to reduce KMS costs
+- Transparent to applications
+
+### Lifecycle Configuration
+- **Resource**: `aws_s3_bucket_lifecycle_configuration.app_storage`
+
+**Rule 1: Intelligent Tiering**
+- After 30 days → Standard-IA (40% cheaper)
+- After 90 days → Glacier (70% cheaper)
+- After 365 days → Automatic deletion
+- Old versions deleted after 30 days
+
+**Rule 2: Incomplete Uploads**
+- Aborts multipart uploads incomplete after 7 days
+- Prevents charges for abandoned uploads
+
+### CORS Configuration
+- **Resource**: `aws_s3_bucket_cors_configuration.app_storage`
+- Allows frontend to upload files directly to S3
+- Bypasses backend for large files (more efficient)
+- Configurable allowed origins
+
+### IAM Role for Service Accounts
+- **Resource**: `aws_iam_role.s3_access`
+- Uses OIDC provider from EKS cluster
+- Allows specific Kubernetes service account to access S3
+- No static credentials needed in pods
+
+## Variables
+
+<ParamField path="project_name" type="string" required>
+  Project name for bucket naming and tagging
+</ParamField>
+
+<ParamField path="environment" type="string" required>
+  Deployment environment: `dev`, `staging`, or `prod`
+</ParamField>
+
+<ParamField path="aws_account_id" type="string" required>
+  AWS account ID for unique bucket naming.
+  
+  Obtain with: `aws sts get-caller-identity --query Account --output text`
+</ParamField>
+
+<ParamField path="cors_allowed_origins" type="list(string)" default='["http://localhost:5173"]'>
+  Origins allowed to make cross-origin requests to S3.
+  
+  **Examples**:
+  - Dev: `["http://localhost:5173", "http://localhost:3000"]`
+  - Prod: `["https://app.govtech.example.com"]`
+</ParamField>
+
+<ParamField path="oidc_provider_arn" type="string" required>
+  ARN of the EKS OIDC provider. Use `oidc_provider_arn` output from kubernetes-cluster module.
+</ParamField>
+
+<ParamField path="oidc_provider_url" type="string" required>
+  OIDC provider URL without `https://` prefix. Use `oidc_provider_url` output from kubernetes-cluster module.
+</ParamField>
+
+## Outputs
+
+<ParamField path="bucket_id" type="string">
+  S3 bucket name (same as bucket name)
+</ParamField>
+
+<ParamField path="bucket_arn" type="string">
+  ARN of the S3 bucket for IAM policies
+</ParamField>
+
+<ParamField path="bucket_domain_name" type="string">
+  FQDN of the bucket: `{bucket-name}.s3.{region}.amazonaws.com`
+</ParamField>
+
+<ParamField path="s3_access_role_arn" type="string">
+  ARN of IAM role for Kubernetes service accounts to assume.
+  
+  Annotate ServiceAccount with this ARN to grant S3 access.
+</ParamField>
+
+<ParamField path="s3_access_role_name" type="string">
+  Name of the IAM role for S3 access
+</ParamField>
+
+## Usage Example
+
+```hcl
+data "aws_caller_identity" "current" {}
+
+module "storage" {
+  source = "./modules/storage"
+
+  project_name   = "govtech"
+  environment    = "prod"
+  aws_account_id = data.aws_caller_identity.current.account_id
+
+  cors_allowed_origins = [
+    "https://app.govtech.example.com",
+    "https://admin.govtech.example.com"
+  ]
+
+  # OIDC provider from EKS cluster
+  oidc_provider_arn = module.kubernetes_cluster.oidc_provider_arn
+  oidc_provider_url = module.kubernetes_cluster.oidc_provider_url
+}
+```
+
+## Kubernetes Integration
+
+### Service Account Configuration
+
+Annotate Kubernetes ServiceAccount to grant S3 access:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend
+  namespace: govtech
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/govtech-prod-s3-access
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: govtech
+spec:
+  template:
+    spec:
+      serviceAccountName: backend  # Use the annotated service account
+      containers:
+      - name: backend
+        image: backend:latest
+        env:
+        - name: S3_BUCKET
+          value: govtech-prod-app-storage-123456789012
+```
+
+### Application Code
+
+Pods automatically receive temporary credentials:
+
+**Node.js (AWS SDK v3)**:
+```javascript
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+
+// SDK automatically uses IRSA credentials
+const s3Client = new S3Client({ region: 'us-east-1' });
+
+const uploadFile = async (fileBuffer, key) => {
+  await s3Client.send(new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    Body: fileBuffer,
+  }));
+};
+```
+
+**Python (boto3)**:
+```python
+import boto3
+import os
+
+# Automatically uses IRSA credentials
+s3_client = boto3.client('s3')
+
+def upload_file(file_content, key):
+    s3_client.put_object(
+        Bucket=os.environ['S3_BUCKET'],
+        Key=key,
+        Body=file_content
+    )
+```
+
+## Direct Frontend Uploads
+
+Generate presigned URLs for secure frontend uploads:
+
+**Backend (Node.js)**:
+```javascript
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+const s3Client = new S3Client({ region: 'us-east-1' });
+
+export async function generateUploadUrl(filename) {
+  const command = new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: `uploads/${Date.now()}-${filename}`,
+    ContentType: 'application/octet-stream',
+  });
+
+  // URL valid for 15 minutes
+  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 900 });
+  return uploadUrl;
+}
+```
+
+**Frontend (React)**:
+```javascript
+async function uploadFile(file) {
+  // Get presigned URL from backend
+  const { uploadUrl } = await fetch('/api/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({ filename: file.name }),
+  }).then(r => r.json());
+
+  // Upload directly to S3
+  await fetch(uploadUrl, {
+    method: 'PUT',
+    body: file,
+    headers: { 'Content-Type': file.type },
+  });
+}
+```
+
+## Lifecycle Management
+
+### Storage Classes
+
+| Class | Use Case | Cost (relative) | Retrieval |
+|-------|----------|-----------------|------------|
+| Standard | Frequently accessed | 1x | Instant |
+| Standard-IA | Infrequent access | 0.6x | Instant |
+| Glacier | Archive | 0.3x | Minutes-hours |
+
+### Custom Lifecycle Rules
+
+Modify lifecycle transitions:
+
+```hcl
+# Keep recent files in Standard, archive old files faster
+transition {
+  days          = 60   # Move to IA after 60 days
+  storage_class = "STANDARD_IA"
+}
+
+transition {
+  days          = 180  # Archive after 180 days
+  storage_class = "GLACIER"
+}
+
+expiration {
+  days = 730  # Delete after 2 years
+}
+```
+
+### Prefix-Based Rules
+
+Different rules for different file types:
+
+```hcl
+rule {
+  id     = "temp-files"
+  status = "Enabled"
+
+  filter {
+    prefix = "temp/"  # Only applies to temp/ folder
+  }
+
+  expiration {
+    days = 7  # Delete temporary files after 7 days
+  }
+}
+
+rule {
+  id     = "permanent-records"
+  status = "Enabled"
+
+  filter {
+    prefix = "records/"
+  }
+
+  transition {
+    days          = 90
+    storage_class = "GLACIER_DEEP_ARCHIVE"  # Cheapest, slowest retrieval
+  }
+}
+```
+
+## Security Best Practices
+
+### Block Public Access
+
+All public access is blocked by default. Files are only accessible:
+- Via IAM authenticated requests
+- Through presigned URLs with expiration
+
+### Encryption
+
+All files encrypted at rest with AES-256. For compliance requirements, use KMS:
+
+```hcl
+sse_algorithm     = "aws:kms"
+kms_master_key_id = var.kms_key_arn
+```
+
+### Access Logging
+
+Enable S3 access logs for audit trail:
+
+```hcl
+resource "aws_s3_bucket_logging" "app_storage" {
+  bucket = aws_s3_bucket.app_storage.id
+
+  target_bucket = aws_s3_bucket.logs.id
+  target_prefix = "s3-access-logs/"
+}
+```
+
+### Bucket Policies
+
+Enforce SSL/TLS for all requests:
+
+```hcl
+resource "aws_s3_bucket_policy" "enforce_ssl" {
+  bucket = aws_s3_bucket.app_storage.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Deny"
+      Principal = "*"
+      Action = "s3:*"
+      Resource = [
+        aws_s3_bucket.app_storage.arn,
+        "${aws_s3_bucket.app_storage.arn}/*"
+      ]
+      Condition = {
+        Bool = {
+          "aws:SecureTransport" = "false"
+        }
+      }
+    }]
+  })
+}
+```
+
+## Cost Optimization
+
+### Intelligent-Tiering
+
+For unpredictable access patterns:
+
+```hcl
+transition {
+  days          = 0
+  storage_class = "INTELLIGENT_TIERING"
+}
+```
+
+S3 automatically moves objects between access tiers based on usage patterns.
+
+### Lifecycle Analysis
+
+Use S3 Storage Lens to analyze access patterns and optimize lifecycle rules:
+
+```bash
+aws s3control get-storage-lens-configuration \
+  --config-id default-account-dashboard \
+  --account-id 123456789012
+```
+
+### Object Size Optimization
+
+- Objects < 128 KB: Standard is most cost-effective
+- Objects < 1 MB: Avoid Glacier (minimum object size charges)
+- Large objects: Use multipart upload (> 100 MB)
+
+## Monitoring
+
+### CloudWatch Metrics
+
+Key metrics to monitor:
+- `BucketSizeBytes` - Total storage usage
+- `NumberOfObjects` - Object count
+- `AllRequests` - Request rate
+- `4xxErrors` / `5xxErrors` - Error rates
+
+### Alarms
+
+```hcl
+resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
+  alarm_name          = "s3-high-error-rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "4xxErrors"
+  namespace           = "AWS/S3"
+  period              = "300"
+  statistic           = "Sum"
+  threshold           = "100"
+
+  dimensions = {
+    BucketName = module.storage.bucket_id
+  }
+}
+```
+
+## Troubleshooting
+
+### CORS Errors
+
+If frontend cannot upload:
+
+1. Verify origin in `cors_allowed_origins` matches exactly (including protocol)
+2. Check browser console for specific CORS error
+3. Ensure presigned URL includes correct headers
+
+### Access Denied
+
+**From pods**:
+1. Verify ServiceAccount has correct role annotation
+2. Check IRSA trust policy includes correct OIDC provider
+3. Test credentials:
+   ```bash
+   kubectl exec -it pod-name -- env | grep AWS
+   ```
+
+**From frontend**:
+1. Verify presigned URL hasn't expired
+2. Check IAM role has `s3:PutObject` permission
+3. Ensure `Content-Type` header matches presigned URL
+
+### Lifecycle Not Working
+
+Lifecycle rules run daily:
+- Changes may take 24-48 hours to take effect
+- Check rule status: Enabled vs Disabled
+- Verify filter prefix matches object keys

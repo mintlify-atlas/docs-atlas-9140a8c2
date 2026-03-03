@@ -1,0 +1,542 @@
+---
+title: Defense-in-Depth Security
+description: Eight layers of security protecting the GovTech platform
+---
+
+## Security Philosophy
+
+The GovTech platform implements **defense-in-depth**: multiple independent layers of security. If one layer is compromised, the others contain the breach and prevent data loss.
+
+<Note>
+All security configurations are based on government compliance requirements including ISO 27001, NIST SP 800-53, and GDPR.
+</Note>
+
+## Security Layers
+
+| Layer | Technology | Protection |
+|-------|-----------|------------|
+| **1. Network Perimeter** | WAF (5 rules) | Web attacks before reaching application |
+| **2. Internal Network** | NetworkPolicies | Zero-trust pod communication |
+| **3. Identity** | RBAC + IRSA | Minimum permissions per component |
+| **4. Secrets** | Secrets Manager + KMS | Encrypted credentials, no hardcoding |
+| **5. Containers** | Trivy + Pod Security | No CRITICAL/HIGH vulnerabilities |
+| **6. Code** | Semgrep + Gitleaks | No secrets or vulnerabilities in git |
+| **7. Audit** | CloudTrail + GuardDuty | Anomaly detection and forensics |
+| **8. Cost** | Cost Anomaly Detection | Alerts on unusual spending |
+
+## Layer 1: WAF (Web Application Firewall)
+
+The WAF inspects every HTTP request before it reaches the application load balancer.
+
+### WAF Rule Configuration
+
+```hcl terraform/modules/security/aws.tf
+resource "aws_wafv2_web_acl" "govtech" {
+  name  = "govtech-waf-prod"
+  scope = "REGIONAL"
+
+  # RULE 1: Amazon IP Reputation List
+  # Blocks known malicious IPs (botnets, Tor exit nodes)
+  rule {
+    name     = "AmazonIpReputationList"
+    priority = 1
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesAmazonIpReputationList"
+        vendor_name = "AWS"
+      }
+    }
+  }
+
+  # RULE 2: Common OWASP Top 10 protections
+  # XSS, path traversal, SQL injection patterns
+  rule {
+    name     = "CommonRuleSet"
+    priority = 2
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+  }
+
+  # RULE 3: SQL Injection specific
+  rule {
+    name     = "SQLiRuleSet"
+    priority = 3
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesSQLiRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+  }
+
+  # RULE 4: Known bad inputs (Log4Shell, SSRF)
+  rule {
+    name     = "KnownBadInputsRuleSet"
+    priority = 4
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+  }
+
+  # RULE 5: Rate limiting (2000 req/5min per IP)
+  rule {
+    name     = "RateLimitRule"
+    priority = 5
+    action {
+      block {}
+    }
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+  }
+}
+```
+
+<Info>
+WAF blocks malicious traffic before it consumes backend resources, reducing attack surface and preventing common web exploits.
+</Info>
+
+## Layer 2: Network Policies (Zero-Trust)
+
+Kubernetes NetworkPolicies implement zero-trust networking: all traffic denied by default, then explicitly allowed.
+
+### Default Deny All
+
+```yaml kubernetes/network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: govtech
+spec:
+  podSelector: {}  # Applies to ALL pods
+  policyTypes:
+    - Ingress   # Block all incoming traffic
+    - Egress    # Block all outgoing traffic
+```
+
+### Frontend Network Policy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  
+  ingress:
+    # Only accept traffic from ALB/Ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 80
+  
+  egress:
+    # Can only call backend
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 3000
+    # DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+### Backend Network Policy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  
+  ingress:
+    # Accept from frontend and ingress controller
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3000
+  
+  egress:
+    # Can connect to database
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    
+    # Can call AWS APIs (HTTPS only)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8      # No private networks
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+```
+
+### Database Network Policy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  
+  ingress:
+    # ONLY backend can connect
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 5432
+  
+  egress:
+    # Database cannot initiate outbound connections
+    # Only DNS for internal resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+<Warning>
+The database cannot initiate any outbound connections. This prevents data exfiltration even if the database is compromised.
+</Warning>
+
+## Layer 3: Identity & Access (RBAC + IRSA)
+
+### Kubernetes RBAC
+
+Each pod has a dedicated service account with minimum required permissions:
+
+```yaml kubernetes/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: govtech-backend
+  namespace: govtech
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::835960996869:role/govtech-backend-role
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: govtech-backend-role
+  namespace: govtech
+rules:
+  # Backend can only read ConfigMaps (not Secrets)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  # Cannot create/delete/update anything
+```
+
+### IRSA (IAM Roles for Service Accounts)
+
+Pods assume IAM roles without hardcoded credentials:
+
+```hcl terraform/modules/storage/aws.tf
+# IAM role for backend pods to access S3
+resource "aws_iam_role" "backend_s3_access" {
+  name = "govtech-backend-s3-access"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = var.oidc_provider_arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${var.oidc_provider_url}:sub" = "system:serviceaccount:govtech:govtech-backend"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "backend_s3_policy" {
+  role = aws_iam_role.backend_s3_access.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ]
+      Resource = "arn:aws:s3:::govtech-documents-prod/*"
+    }]
+  })
+}
+```
+
+## Layer 4: Secrets Management
+
+### AWS Secrets Manager
+
+All sensitive data encrypted with KMS and accessed via IAM:
+
+```hcl terraform/modules/security/aws.tf
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name                    = "govtech/prod/db-credentials"
+  description             = "PostgreSQL credentials for backend"
+  kms_key_id              = aws_kms_key.govtech_main.arn
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "db_credentials" {
+  secret_id = aws_secretsmanager_secret.db_credentials.id
+  
+  secret_string = jsonencode({
+    username = "govtech_admin"
+    password = "POPULATED_AFTER_RDS_CREATION"
+    host     = "rds-endpoint.us-east-1.rds.amazonaws.com"
+    port     = "5432"
+    dbname   = "govtech"
+  })
+}
+```
+
+### KMS Encryption
+
+Centralized key management with automatic rotation:
+
+```hcl
+resource "aws_kms_key" "govtech_main" {
+  description             = "Master encryption key for GovTech"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true  # Automatic yearly rotation
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::835960996869:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudTrail to encrypt logs"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action = [
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+```
+
+## Layer 5: Container Security
+
+### Pod Security Context
+
+```yaml kubernetes/backend/deployment.yaml
+securityContext:
+  runAsNonRoot: true              # Never run as root
+  runAsUser: 1000                 # Run as user ID 1000
+  allowPrivilegeEscalation: false # Cannot gain more privileges
+  readOnlyRootFilesystem: false   # Application needs write
+  capabilities:
+    drop:
+    - ALL                         # Drop all Linux capabilities
+```
+
+### Image Scanning (Trivy)
+
+Every image scanned before deployment:
+
+```yaml .github/workflows/backend-ci.yml
+- name: Run Trivy vulnerability scanner
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: ${{ env.ECR_REGISTRY }}/govtech-backend:${{ github.sha }}
+    format: 'table'
+    exit-code: '1'  # Fail build if CRITICAL or HIGH found
+    severity: 'CRITICAL,HIGH'
+```
+
+## Layer 6: CloudTrail Auditing
+
+All AWS actions logged and encrypted:
+
+```hcl terraform/modules/security/aws.tf
+resource "aws_cloudtrail" "govtech_audit" {
+  name                          = "govtech-audit-trail-prod"
+  s3_bucket_name                = var.logs_bucket
+  include_global_service_events = true
+  is_multi_region_trail         = true
+  enable_log_file_validation    = true  # Detect log tampering
+  kms_key_id                    = aws_kms_key.govtech_main.arn
+
+  event_selector {
+    read_write_type           = "All"
+    include_management_events = true
+
+    # Log S3 data events (who accessed what file)
+    data_resource {
+      type   = "AWS::S3::Object"
+      values = ["arn:aws:s3:::"]
+    }
+  }
+}
+```
+
+### CloudWatch Log Group
+
+```hcl
+resource "aws_cloudwatch_log_group" "cloudtrail" {
+  name              = "/aws/cloudtrail/govtech-prod"
+  retention_in_days = 365  # 1 year retention for compliance
+  kms_key_id        = aws_kms_key.govtech_main.arn
+}
+```
+
+## Layer 7: GuardDuty (Threat Detection)
+
+ML-powered intrusion detection:
+
+```hcl terraform/modules/security/aws.tf
+resource "aws_guardduty_detector" "main" {
+  enable = true
+
+  datasources {
+    s3_logs {
+      enable = true  # Detect S3 data exfiltration
+    }
+    kubernetes {
+      audit_logs {
+        enable = true  # Detect suspicious EKS API calls
+      }
+    }
+    malware_protection {
+      scan_ec2_instance_with_findings {
+        ebs_volumes {
+          enable = true  # Scan volumes for malware
+        }
+      }
+    }
+  }
+}
+```
+
+<Info>
+GuardDuty analyzes billions of events across VPC Flow Logs, DNS logs, CloudTrail, and Kubernetes audit logs to detect threats using machine learning.
+</Info>
+
+## Layer 8: Security Hub (Compliance)
+
+Centralized security dashboard:
+
+```hcl
+resource "aws_securityhub_account" "main" {}
+
+# CIS AWS Foundations Benchmark
+resource "aws_securityhub_standards_subscription" "cis" {
+  standards_arn = "arn:aws:securityhub:us-east-1::standards/cis-aws-foundations-benchmark/v/1.4.0"
+}
+
+# AWS Foundational Security Best Practices
+resource "aws_securityhub_standards_subscription" "aws_best_practices" {
+  standards_arn = "arn:aws:securityhub:us-east-1::standards/aws-foundational-security-best-practices/v/1.0.0"
+}
+```
+
+## Incident Response Process
+
+<Steps>
+  <Step title="Detect">
+    GuardDuty finding or CloudWatch alarm triggers
+  </Step>
+  <Step title="Contain">
+    Revoke compromised credentials, isolate affected pods
+    ```bash
+    aws iam delete-access-key --user-name compromised-user --access-key-id KEY_ID
+    kubectl label pod suspicious-pod quarantine=true
+    ```
+  </Step>
+  <Step title="Assess">
+    Review CloudTrail logs to determine scope and affected data
+  </Step>
+  <Step title="Notify">
+    Alert team and authorities if citizen data compromised
+  </Step>
+  <Step title="Remediate">
+    Apply fixes, rotate credentials, patch vulnerabilities
+  </Step>
+  <Step title="Document">
+    Post-mortem analysis and preventive actions
+  </Step>
+</Steps>
+
+## Compliance Mapping
+
+| Standard | Requirement | Implementation |
+|----------|-------------|----------------|
+| **ISO 27001** | Access control, encryption, logs | IAM least privilege, TLS, CloudTrail |
+| **GDPR** | Data protection, right to be forgotten | AES-256 encryption, S3 lifecycle policies |
+| **NIST SP 800-53** | Security controls for government systems | Audit logs, MFA, network segmentation |
+| **SOC 2** | Security, availability, confidentiality | Multi-AZ, backups, encryption at rest |
+
+<Check>
+The platform implements defense-in-depth with 8 independent security layers. Even if one layer is breached, the remaining layers prevent unauthorized access to sensitive data.
+</Check>
